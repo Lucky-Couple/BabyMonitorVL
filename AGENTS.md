@@ -20,7 +20,7 @@ The MVP intentionally uses a multimodal LLM/VLM for all semantic visual interpre
 - Capture and inference remain separate asynchronous tasks.
 - `latest_capture` is for the unannotated live preview. The annotated result must always use the exact historical JPEG submitted to the model.
 - History is process-memory-only and is pruned only by `HISTORY_MAX_BYTES`. Do not add persistence, a frame-count cap, or a TTL without an explicit product decision and migration note.
-- RTSP reconnect backoff remains bounded exponential backoff: 1, 2, 4, 8, 16, then 30 seconds.
+- RTSP reconnect backoff remains bounded exponential backoff: 1, 2, 4, 8, 16, then 30 seconds. Status keeps consecutive `reconnect_attempt` separate from nullable `reconnect_delay_seconds`; never overload the attempt counter with a duration.
 - No audio, push, SMS, email, or audible alarm is part of this MVP.
 - API and UI coordinates are always canonical `[ymin, xmin, ymax, xmax]`, integer normalized to `0..1000`.
 - Ollama model basenames matching `qwen*` use model-native `[xmin, ymin, xmax, ymax]`; convert every box to canonical order before Pydantic validation and API/history exposure. Gemini and unknown model families use canonical order unless a tested model adapter says otherwise.
@@ -32,6 +32,8 @@ See [Architecture](docs/ARCHITECTURE.md), [Analysis contract](docs/ANALYSIS_CONT
 ## Repository map
 
 - `babymonitorvl/main.py`: FastAPI composition, API routes, WebSocket, frontend static hosting.
+- `babymonitorvl/config.py`: environment-backed immutable runtime settings and defaults.
+- `babymonitorvl/events.py`: bounded WebSocket event fan-out and subscriber lifecycle.
 - `babymonitorvl/monitor.py`: session lifecycle, capture/inference scheduling, retry and status accounting.
 - `babymonitorvl/ffmpeg.py`: command construction, MJPEG framing, JPEG dimension parsing. No semantic vision belongs here.
 - `babymonitorvl/schemas.py`: public structured analysis and API contracts.
@@ -94,6 +96,7 @@ Before handoff:
 - Provider schema compatibility belongs in `VisionBackend.prepare_output_schema()`. Ollama keeps the complete Pydantic schema; Gemini must use the smoke-validated `google-ai-structured-output-compact-v1` representation while retaining the complete schema in the prompt and `FrameAnalysis` validation. Never bypass or broaden the compact projection merely because a keyword works in isolation; require the evidence and tests in `docs/GEMINI_PROVIDER.md`.
 - Keep temperature at zero unless an explicit experiment changes the comparison baseline.
 - Ollama sends `think=false`. Gemini omits `thinking_level` for the dynamic model list and uses the provider/model default. Never add a Gemini thinking override without the capability adapter, evidence, fallback, and tests required by `docs/GEMINI_PROVIDER.md`. If a provider reports thinking tokens, count them as output tokens.
+- Gemini inference uses the SDK's native `client.aio.interactions.create()` path so monitor cancellation reaches the in-flight HTTP coroutine. Do not replace it with `asyncio.to_thread()` around the synchronous call.
 - Retry at most once for transient/unclassified failures and local validation failures. Do not replay deterministic provider HTTP 4xx errors with an unchanged request. Preserve raw responses and errors for debugging.
 - Treat model hallucinations as visible model output. Improve the shared prompt or contract; do not hide failures with conventional CV post-processing.
 

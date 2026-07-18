@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [0.2.0] - 2026-07-19
+
 ### Changed
 
 - Prepared repository-level development, architecture, contract, and release documentation.
@@ -17,6 +19,9 @@ All notable changes to this project are documented here. The format follows Keep
 - Added a provider-level, real-smoke-validated Google AI compact structured-output projection that inlines references and retains fields/required/enums while preserving the full prompt and local Pydantic validation contract.
 - Added strict single-value JSON decoding that tolerates only an optional Markdown fence wrapper, fixing valid Gemma structured responses with a stray closing fence while continuing to reject prose and duplicate JSON values.
 - Added a provider-neutral compatibility engineering playbook covering layered diagnosis, minimal real-provider experiments, portable request baselines, schema projection, strict parsing, retry classification, secret ownership, coordinate adapters, and release regression gates.
+- Separated RTSP reconnect ordinals from retry-delay seconds in status and surfaced both in the reconnecting UI state.
+- Switched Gemini inference from a synchronous worker thread to the SDK's native async Interactions client with cancellation-aware timeouts and complete sync/async transport cleanup.
+- Added concise retry correction prompts for local JSON-envelope and non-object failures as well as Pydantic validation failures.
 
 ### Added
 
@@ -26,6 +31,16 @@ All notable changes to this project are documented here. The format follows Keep
 
 - Web-submitted Gemini keys are never echoed or browser-persisted, and cannot be changed during an active monitor session.
 - Provider-owned runtime secrets, including web-submitted Gemini keys, are redacted from health details and model-analysis errors before reaching APIs, events, status, or history.
+
+### Release metadata
+
+- Application version: `0.2.0`.
+- Prompt version: `baby-monitor-single-frame-v4-cat-detection`.
+- Analysis schema version: `1.1`.
+
+### Known limitations
+
+- Experimental, human-reviewed demo only; no medical, life-safety, unattended-monitoring, authentication, persistence, multi-camera, temporal reasoning, or external alerting guarantees.
 
 ## [0.1.0] - 2026-07-18
 

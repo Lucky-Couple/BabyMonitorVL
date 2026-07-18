@@ -38,7 +38,7 @@ The FFmpeg command uses argument arrays, never a shell. It applies `fps`, aspect
 
 For every sampled JPEG, capture updates the unannotated live image and offers the frame to the queue. If the queue is full, the queued frame is replaced. This preserves freshness when inference is slower than capture.
 
-If FFmpeg ends, capture publishes a redacted error and reconnects after 1, 2, 4, 8, 16, then at most 30 seconds. Stopping a session cancels tasks and terminates, then kills if necessary, the subprocess.
+If FFmpeg ends, capture publishes a redacted error and reconnects after 1, 2, 4, 8, 16, then at most 30 seconds. `reconnect_attempt` is the consecutive reconnect ordinal; `reconnect_delay_seconds` is populated only while waiting for the next attempt. Both reset after a valid frame or an explicit stop. Stopping a session cancels tasks and terminates, then kills if necessary, the subprocess.
 
 ## Inference path
 
@@ -49,7 +49,7 @@ The inference task resolves the model-family coordinate convention once per sess
 3. Preserves the raw response and provider usage metadata.
 4. Converts model-native boxes to canonical order when required.
 5. Validates with `FrameAnalysis`.
-6. Retries once on failure; validation retries include concise correction details.
+6. Retries once on eligible failures; JSON-envelope and Pydantic validation retries include concise, raw-output-free correction details.
 7. Updates the same record as success or error and publishes an event.
 
 The task never submits multiple frames concurrently. Cancellation updates the current record as canceled and prevents a late result from becoming current after the session id changes.
@@ -78,6 +78,7 @@ Gemini credentials may originate from the backend environment or from the settin
 - Stream failure: status becomes reconnecting; historical results remain.
 - Slow model: frames are overwritten at the queue and counted as dropped.
 - Provider/network/schema failure: at most two attempts; the failed submitted frame remains in history.
+- Gemini timeout/stop: the native async SDK request is canceled with the analysis task; the SDK request also receives the configured per-call timeout.
 - Invalid box: no clamping or repair; validation fails visibly.
 - Process restart: history and session state are lost by design.
 - Browser disconnect: backend monitoring continues; WebSocket reconnect restores status/history.

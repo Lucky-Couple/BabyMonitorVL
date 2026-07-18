@@ -43,6 +43,25 @@ def test_project_has_no_conventional_cv_dependencies() -> None:
     assert not any(name in dependencies for name in forbidden)
 
 
+def test_docker_context_excludes_local_caches_tests_and_docs() -> None:
+    entries = {
+        line.strip()
+        for line in (ROOT / ".dockerignore").read_text(encoding="utf-8").splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    }
+    assert {
+        ".venv",
+        ".pytest_cache",
+        ".ruff_cache",
+        "frontend/node_modules",
+        "frontend/dist",
+        "frontend/.pnpm-store",
+        "tests",
+        "docs",
+        ".env",
+    } <= entries
+
+
 def test_relative_markdown_links_resolve() -> None:
     link_pattern = re.compile(r"\[[^]]+\]\(([^)]+)\)")
     missing: list[str] = []

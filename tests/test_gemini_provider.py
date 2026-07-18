@@ -1,3 +1,4 @@
+import asyncio
 from types import SimpleNamespace
 
 import pytest
@@ -44,7 +45,7 @@ class FakeInteractions:
     def __init__(self) -> None:
         self.kwargs = None
 
-    def create(self, **kwargs):
+    async def create(self, **kwargs):
         self.kwargs = kwargs
         return SimpleNamespace(
             output_text='{"ok":true}',
@@ -59,9 +60,22 @@ class FakeInteractions:
         )
 
 
-class FakeAnalyzeClient:
+class FakeAsyncClient:
     def __init__(self) -> None:
         self.interactions = FakeInteractions()
+        self.closed = False
+
+    async def aclose(self) -> None:
+        self.closed = True
+
+
+class FakeAnalyzeClient:
+    def __init__(self) -> None:
+        self.aio = FakeAsyncClient()
+        self.closed = False
+
+    def close(self) -> None:
+        self.closed = True
 
 
 @pytest.mark.asyncio
@@ -192,14 +206,15 @@ async def test_gemini_uses_portable_v2_interactions_schema_without_thinking_over
         )
     )
 
-    assert client.interactions.kwargs["response_format"] == {
+    assert client.aio.interactions.kwargs["response_format"] == {
         "type": "text",
         "mime_type": "application/json",
         "schema": schema,
     }
     assert backend.schema_profile == GEMINI_SCHEMA_PROFILE
-    assert client.interactions.kwargs["store"] is False
-    assert client.interactions.kwargs["generation_config"] == {"temperature": 0}
+    assert client.aio.interactions.kwargs["store"] is False
+    assert client.aio.interactions.kwargs["generation_config"] == {"temperature": 0}
+    assert client.aio.interactions.kwargs["timeout"] == backend.timeout_seconds
     assert result.raw_response == '{"ok":true}'
     assert result.usage["input_tokens"] == 120
     assert result.usage["output_tokens"] == 40
@@ -210,10 +225,14 @@ async def test_gemini_uses_portable_v2_interactions_schema_without_thinking_over
 async def test_gemini_usage_accepts_mapping_response_metadata() -> None:
     backend = GeminiBackend("test-key")
     client = FakeAnalyzeClient()
-    client.interactions.create = lambda **_: SimpleNamespace(
-        output_text='{"ok":true}',
-        usage={"total_input_tokens": 7, "total_output_tokens": 3, "total_tokens": 10},
-    )
+
+    async def create(**_) -> SimpleNamespace:
+        return SimpleNamespace(
+            output_text='{"ok":true}',
+            usage={"total_input_tokens": 7, "total_output_tokens": 3, "total_tokens": 10},
+        )
+
+    client.aio.interactions.create = create
     backend._client = client
 
     result = await backend.analyze(
@@ -231,3 +250,65 @@ async def test_gemini_usage_accepts_mapping_response_metadata() -> None:
 
     assert result.usage["input_tokens"] == 7
     assert result.usage["output_tokens"] == 3
+
+
+@pytest.mark.asyncio
+async def test_gemini_timeout_cancels_native_async_interaction() -> None:
+    backend = GeminiBackend("test-key", timeout_seconds=0.01)
+    cancelled = False
+
+    async def create(**_) -> None:
+        nonlocal cancelled
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            cancelled = True
+            raise
+
+    async_client = SimpleNamespace(interactions=SimpleNamespace(create=create))
+    backend._client = SimpleNamespace(aio=async_client)
+
+    with pytest.raises(TimeoutError):
+        await backend.analyze(
+            AnalysisRequest(
+                image_bytes=b"jpeg-data",
+                mime_type="image/jpeg",
+                width=1,
+                height=1,
+                prompt="Return JSON.",
+                output_schema={"type": "object"},
+                model="gemini-test",
+                generation_params={"temperature": 0},
+            )
+        )
+
+    assert cancelled is True
+
+
+@pytest.mark.asyncio
+async def test_gemini_close_handles_async_and_awaitable_sync_clients() -> None:
+    backend = GeminiBackend("test-key")
+    async_closed = False
+    sync_closed = False
+
+    async def aclose() -> None:
+        nonlocal async_closed
+        async_closed = True
+
+    async def finish_sync_close() -> None:
+        nonlocal sync_closed
+        sync_closed = True
+
+    client = SimpleNamespace(
+        aio=SimpleNamespace(aclose=aclose),
+        close=lambda: finish_sync_close(),
+    )
+    backend._client = client
+    backend._async_client = client.aio
+
+    await backend.close()
+
+    assert async_closed is True
+    assert sync_closed is True
+    assert backend._client is None
+    assert backend._async_client is None

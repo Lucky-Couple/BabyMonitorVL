@@ -102,6 +102,7 @@ export interface MonitorStatus {
   last_record_id: string | null;
   last_error: string | null;
   reconnect_attempt: number;
+  reconnect_delay_seconds: number | null;
   input_tokens: number;
   output_tokens: number;
   history: { items: number; bytes: number; max_bytes: number };

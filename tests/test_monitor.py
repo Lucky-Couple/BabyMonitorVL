@@ -1,15 +1,32 @@
 import asyncio
+import json
 from datetime import timezone
 
+import pytest
+
+from babymonitorvl.config import Settings
+from babymonitorvl.coordinates import ModelOutputError
+from babymonitorvl.events import EventHub
+from babymonitorvl.history import HistoryStore
 from babymonitorvl.monitor import (
     CapturedFrame,
+    MonitorService,
+    local_validation_correction,
     offer_latest,
     redact_sensitive_text,
     redact_url,
     utc_now,
     version_at_least,
 )
-from babymonitorvl.providers.base import aggregate_usage, should_retry_provider_error
+from babymonitorvl.providers.base import (
+    AnalysisRequest,
+    ProviderCallResult,
+    ProviderHealth,
+    VisionBackend,
+    aggregate_usage,
+    should_retry_provider_error,
+)
+from babymonitorvl.schemas import MonitorStartRequest, ProviderName
 
 
 def frame(sequence: int) -> CapturedFrame:
@@ -70,3 +87,123 @@ def test_transient_and_unclassified_provider_errors_are_retried() -> None:
 def test_provider_secrets_are_removed_from_public_error_text() -> None:
     secret = "runtime-provider-secret"
     assert redact_sensitive_text(f"request failed for key {secret}", (secret,)) == "request failed for key ***"
+
+
+def test_local_json_and_schema_failures_get_correction_codes() -> None:
+    json_error = json.JSONDecodeError("invalid", "x", 0)
+    assert local_validation_correction(json_error) == "root:invalid_json_envelope"
+    assert local_validation_correction(ModelOutputError("not an object")) == "root:not_json_object"
+    assert local_validation_correction(RuntimeError("provider failed")) is None
+
+
+class JsonRetryBackend(VisionBackend):
+    name = ProviderName.OLLAMA
+
+    def __init__(self) -> None:
+        self.prompts: list[str] = []
+
+    async def healthcheck(self) -> ProviderHealth:
+        return ProviderHealth(True, "ready", ["test-model"], "1.0.0")
+
+    async def analyze(self, request: AnalysisRequest) -> ProviderCallResult:
+        self.prompts.append(request.prompt)
+        if len(self.prompts) == 1:
+            return ProviderCallResult("not valid JSON")
+        return valid_empty_analysis_result()
+
+
+def valid_empty_analysis_result() -> ProviderCallResult:
+    return ProviderCallResult(
+        json.dumps(
+            {
+                "schema_version": "1.1",
+                "summary": "No infant is visible.",
+                "image_quality": "good",
+                "infants": [],
+                "cats": [],
+                "overall_risk": "unknown",
+                "risk_reasons": [],
+            }
+        )
+    )
+
+
+class ProviderJsonErrorRetryBackend(JsonRetryBackend):
+    async def analyze(self, request: AnalysisRequest) -> ProviderCallResult:
+        self.prompts.append(request.prompt)
+        if len(self.prompts) == 1:
+            raise json.JSONDecodeError("provider response was not JSON", "x", 0)
+        return valid_empty_analysis_result()
+
+
+@pytest.mark.asyncio
+async def test_analysis_retry_adds_json_validation_correction(tmp_path) -> None:
+    backend = JsonRetryBackend()
+    history = HistoryStore(1024 * 1024)
+    service = MonitorService(
+        Settings(frontend_dist=tmp_path),
+        history,
+        EventHub(),
+        {ProviderName.OLLAMA: backend},
+    )
+    session_id = "json-retry-session"
+    service._session_id = session_id
+    service._config = MonitorStartRequest(
+        rtsp_url="rtsp://camera.invalid/stream",
+        provider=ProviderName.OLLAMA,
+        model="test-model",
+    )
+    service._model = "test-model"
+    await service._queue.put(frame(1))
+    task = asyncio.create_task(service._analysis_loop(session_id))
+
+    async def wait_for_completion() -> None:
+        while service._state["completed_count"] < 1:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_completion(), timeout=1)
+    service._session_id = None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert len(backend.prompts) == 2
+    assert "VALIDATION CORRECTION" not in backend.prompts[0]
+    assert "root:invalid_json_envelope" in backend.prompts[1]
+    assert "Return exactly one valid JSON object" in backend.prompts[1]
+    records, _ = await history.list(limit=10)
+    assert records[0].status == "success"
+    assert records[0].attempts == 2
+
+
+@pytest.mark.asyncio
+async def test_provider_json_error_retries_without_model_output_correction(tmp_path) -> None:
+    backend = ProviderJsonErrorRetryBackend()
+    service = MonitorService(
+        Settings(frontend_dist=tmp_path),
+        HistoryStore(1024 * 1024),
+        EventHub(),
+        {ProviderName.OLLAMA: backend},
+    )
+    session_id = "provider-json-error-session"
+    service._session_id = session_id
+    service._config = MonitorStartRequest(
+        rtsp_url="rtsp://camera.invalid/stream",
+        provider=ProviderName.OLLAMA,
+        model="test-model",
+    )
+    service._model = "test-model"
+    await service._queue.put(frame(1))
+    task = asyncio.create_task(service._analysis_loop(session_id))
+
+    async def wait_for_completion() -> None:
+        while service._state["completed_count"] < 1:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_completion(), timeout=1)
+    service._session_id = None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert len(backend.prompts) == 2
+    assert "VALIDATION CORRECTION" not in backend.prompts[0]
+    assert "VALIDATION CORRECTION" not in backend.prompts[1]

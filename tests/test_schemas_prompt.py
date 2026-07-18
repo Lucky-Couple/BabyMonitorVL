@@ -5,6 +5,7 @@ from pydantic import ValidationError
 
 from babymonitorvl.coordinates import (
     BoxCoordinateOrder,
+    ModelOutputError,
     decode_model_json_object,
     model_box_order,
     normalize_analysis_payload,
@@ -70,6 +71,11 @@ def test_model_json_parser_rejects_non_fence_trailing_content(suffix: str) -> No
 def test_model_json_parser_rejects_unclosed_opening_fence() -> None:
     with pytest.raises(json.JSONDecodeError, match="Markdown fence is not closed"):
         decode_model_json_object('```json\n{"ok": true}')
+
+
+def test_model_analysis_rejects_non_object_json() -> None:
+    with pytest.raises(ModelOutputError, match="must be a JSON object"):
+        parse_model_analysis("[]", BoxCoordinateOrder.YXYX)
 
 
 def test_prompt_embeds_exact_schema() -> None:

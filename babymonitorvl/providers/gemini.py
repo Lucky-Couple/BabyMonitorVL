@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import inspect
 from copy import deepcopy
 from typing import Any
 
@@ -143,6 +144,7 @@ class GeminiBackend(VisionBackend):
         self.timeout_seconds = timeout_seconds
         self.key_source = key_source or ("environment" if api_key else "none")
         self._client: Any = None
+        self._async_client: Any = None
 
     def sensitive_values(self) -> tuple[str, ...]:
         return (self.api_key,) if self.api_key else ()
@@ -203,10 +205,11 @@ class GeminiBackend(VisionBackend):
 
     async def analyze(self, request: AnalysisRequest) -> ProviderCallResult:
         client = self._get_client()
+        async_client = client.aio
+        self._async_client = async_client
         image_data = base64.b64encode(request.image_bytes).decode("ascii")
-
-        def invoke() -> Any:
-            return client.interactions.create(
+        response = await asyncio.wait_for(
+            async_client.interactions.create(
                 model=request.model,
                 input=[
                     {"type": "text", "text": request.prompt},
@@ -221,9 +224,10 @@ class GeminiBackend(VisionBackend):
                     "temperature": request.generation_params.get("temperature", 0),
                 },
                 store=False,
-            )
-
-        response = await asyncio.wait_for(asyncio.to_thread(invoke), timeout=self.timeout_seconds)
+                timeout=self.timeout_seconds,
+            ),
+            timeout=self.timeout_seconds,
+        )
         raw = getattr(response, "output_text", None)
         if not isinstance(raw, str):
             raise ValueError("Gemini response did not contain output_text")
@@ -239,9 +243,20 @@ class GeminiBackend(VisionBackend):
 
     async def close(self) -> None:
         client = self._client
+        async_client = self._async_client
         self._client = None
-        if client is None:
-            return
-        close = getattr(client, "close", None)
-        if callable(close):
-            await asyncio.to_thread(close)
+        self._async_client = None
+        try:
+            if async_client is not None:
+                aclose = getattr(async_client, "aclose", None)
+                if callable(aclose):
+                    result = aclose()
+                    if inspect.isawaitable(result):
+                        await result
+        finally:
+            if client is not None:
+                close = getattr(client, "close", None)
+                if callable(close):
+                    result = await asyncio.to_thread(close)
+                    if inspect.isawaitable(result):
+                        await result

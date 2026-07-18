@@ -20,6 +20,8 @@ async def test_prompt_and_stopped_status_are_available_without_models(tmp_path) 
     assert "JSON_SCHEMA" in prompt.json()["prompt"]
     assert status.status_code == 200
     assert status.json()["state"] == "stopped"
+    assert status.json()["reconnect_attempt"] == 0
+    assert status.json()["reconnect_delay_seconds"] is None
     assert status.json()["history"]["items"] == 0
 
 

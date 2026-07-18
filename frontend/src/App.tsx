@@ -93,6 +93,7 @@ const emptyStatus: MonitorStatus = {
   last_record_id: null,
   last_error: null,
   reconnect_attempt: 0,
+  reconnect_delay_seconds: null,
   input_tokens: 0,
   output_tokens: 0,
   history: { items: 0, bytes: 0, max_bytes: 0 },
@@ -115,6 +116,15 @@ function formatBytes(value: number) {
 function formatTokens(value: number | null | undefined) {
   if (value == null) return "—";
   return new Intl.NumberFormat("zh-CN").format(value);
+}
+
+function connectionLabel(status: MonitorStatus) {
+  if (status.state === "streaming") return "监控中";
+  if (status.state === "stopped") return "已停止";
+  if (status.state === "connecting") return "正在连接";
+  const attempt = status.reconnect_attempt > 0 ? ` · 第 ${status.reconnect_attempt} 次` : "";
+  const delay = status.reconnect_delay_seconds !== null ? ` · ${status.reconnect_delay_seconds}s 后重试` : "";
+  return `正在重连${attempt}${delay}`;
 }
 
 function RiskBadge({ risk }: { risk: Risk | null | undefined }) {
@@ -499,7 +509,7 @@ export default function App() {
             Gemini Key
           </button>
           <div className={`connection-state state-${status.state}`}>
-            <i />{status.state === "streaming" ? "监控中" : status.state === "stopped" ? "已停止" : status.state === "reconnecting" ? "正在重连" : "正在连接"}
+            <i />{connectionLabel(status)}
           </div>
         </div>
       </header>

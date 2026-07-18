@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import json
 import re
 import shutil
 import time
@@ -14,7 +15,7 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pydantic import ValidationError
 
 from .config import Settings
-from .coordinates import CANONICAL_BOX_ORDER, model_box_order, parse_model_analysis
+from .coordinates import CANONICAL_BOX_ORDER, ModelOutputError, model_box_order, parse_model_analysis
 from .events import EventHub
 from .ffmpeg import build_ffmpeg_command, collect_stderr, jpeg_dimensions, read_mjpeg_frames
 from .history import HistoryRecord, HistoryStore
@@ -52,6 +53,22 @@ def redact_sensitive_text(value: str, secrets: tuple[str, ...]) -> str:
         if secret:
             result = result.replace(secret, "***")
     return result
+
+
+def local_validation_correction(exc: Exception) -> str | None:
+    """Describe local model-output failures without copying raw output into prompts."""
+
+    if isinstance(exc, json.JSONDecodeError):
+        return "root:invalid_json_envelope"
+    if isinstance(exc, ModelOutputError):
+        return "root:not_json_object"
+    if isinstance(exc, ValidationError):
+        issues = []
+        for item in exc.errors(include_input=False):
+            location = ".".join(str(part) for part in item.get("loc", ())) or "root"
+            issues.append(f"{location}:{item.get('type', 'invalid')}")
+        return ", ".join(issues[:8])
+    return None
 
 
 def version_at_least(version: str | None, minimum: tuple[int, int, int]) -> bool:
@@ -125,6 +142,7 @@ class MonitorService:
             "last_record_id": None,
             "last_error": None,
             "reconnect_attempt": 0,
+            "reconnect_delay_seconds": None,
             "input_tokens": 0,
             "output_tokens": 0,
         }
@@ -214,6 +232,8 @@ class MonitorService:
             self._model = None
             self._state["state"] = "stopped"
             self._state["session_id"] = None
+            self._state["reconnect_attempt"] = 0
+            self._state["reconnect_delay_seconds"] = None
         await self._publish_status()
 
     async def close(self) -> None:
@@ -235,10 +255,16 @@ class MonitorService:
         assert self._config is not None
         config = self._config
         reconnect_delay = 1
+        reconnect_attempt = 0
         sequence = 0
         try:
             while self._session_id == session_id:
-                self._state["state"] = "connecting" if sequence == 0 else "reconnecting"
+                self._state.update(
+                    {
+                        "state": "connecting" if reconnect_attempt == 0 else "reconnecting",
+                        "reconnect_delay_seconds": None,
+                    }
+                )
                 await self._publish_status()
                 command = build_ffmpeg_command(
                     self.settings.ffmpeg_binary,
@@ -277,9 +303,11 @@ class MonitorService:
                                 "capture_count": sequence,
                                 "last_capture_at": captured_at.isoformat(),
                                 "reconnect_attempt": 0,
+                                "reconnect_delay_seconds": None,
                             }
                         )
                         reconnect_delay = 1
+                        reconnect_attempt = 0
                         if offer_latest(self._queue, frame):
                             self._state["dropped_count"] += 1
                         await self.events.publish(
@@ -313,11 +341,13 @@ class MonitorService:
                     break
                 message = " | ".join(filter(None, stderr_lines[-3:])) or "FFmpeg stream ended"
                 message = message.replace(config.rtsp_url, redact_url(config.rtsp_url))
+                reconnect_attempt += 1
                 self._state.update(
                     {
                         "state": "reconnecting",
                         "last_error": message,
-                        "reconnect_attempt": reconnect_delay,
+                        "reconnect_attempt": reconnect_attempt,
+                        "reconnect_delay_seconds": reconnect_delay,
                     }
                 )
                 await self._publish_status()
@@ -384,6 +414,7 @@ class MonitorService:
             attempts = 0
             try:
                 for attempts in range(1, 3):
+                    local_output_failure = False
                     try:
                         result = await provider.analyze(request)
                         raw_responses.append(result.raw_response)
@@ -391,31 +422,31 @@ class MonitorService:
                         usage = aggregate_usage(attempt_usages)
                         self._state["input_tokens"] += token_count(result.usage, "input_tokens")
                         self._state["output_tokens"] += token_count(result.usage, "output_tokens")
-                        analysis = parse_model_analysis(result.raw_response, box_order)
+                        try:
+                            analysis = parse_model_analysis(result.raw_response, box_order)
+                        except (json.JSONDecodeError, ModelOutputError, ValidationError):
+                            local_output_failure = True
+                            raise
                         break
                     except asyncio.CancelledError:
                         raise
                     except Exception as exc:
+                        correction = local_validation_correction(exc) if local_output_failure else None
                         safe_error = str(exc).replace(config.rtsp_url, redact_url(config.rtsp_url))
                         safe_error = redact_sensitive_text(safe_error, provider.sensitive_values())
                         errors.append(f"attempt {attempts}: {type(exc).__name__}: {safe_error}")
                         if not should_retry_provider_error(exc):
                             break
-                        if attempts == 1 and isinstance(exc, ValidationError):
-                            issues = []
-                            for item in exc.errors(include_input=False):
-                                location = ".".join(str(part) for part in item.get("loc", ())) or "root"
-                                issues.append(f"{location}:{item.get('type', 'invalid')}")
-                            issue_text = ", ".join(issues[:8])
+                        if attempts == 1 and correction is not None:
                             request = AnalysisRequest(
                                 image_bytes=request.image_bytes,
                                 mime_type=request.mime_type,
                                 width=request.width,
                                 height=request.height,
                                 prompt=(
-                                    prompt
-                                    + "\n\nVALIDATION CORRECTION: The previous output failed validation "
-                                    + f"({issue_text}). Return every required key and obey all enum and box constraints. "
+                                    prompt + "\n\nVALIDATION CORRECTION: The previous output failed local response "
+                                    + f"validation ({correction}). Return exactly one valid JSON object, include every "
+                                    + "required key, and obey all enum and box constraints. "
                                     + "Always return cats; use cats=[] when no real cat is clearly visible. "
                                     + "If no infant is visible, use infants=[] and overall_risk=unknown."
                                 ),

@@ -6,7 +6,7 @@ Use the provider-neutral [compatibility engineering method](PROVIDER_COMPATIBILI
 
 ## Supported client and API surface
 
-BabyMonitorVL uses the official `google-genai` Python SDK, constrained to `>=2.0,<3`, and the Interactions API. The provider sends one text item and one base64 JPEG item, requests structured JSON with a single polymorphic text `response_format` object, and sets `store=false`.
+BabyMonitorVL uses the official `google-genai` Python SDK, constrained to `>=2.0,<3`, and the Interactions API. Inference calls use `client.aio.interactions.create()` rather than wrapping the synchronous client in a worker thread, so task cancellation reaches the request coroutine. The provider sends one text item and one base64 JPEG item, requests structured JSON with a single polymorphic text `response_format` object, sets request and outer coroutine timeouts, and sets `store=false`.
 
 Before changing this adapter, review the current official sources rather than relying on SDK type names or memory:
 
@@ -124,7 +124,7 @@ Provider failures are classified before retrying:
 - retry once for timeouts, network/unclassified failures, JSON/Schema validation failures, HTTP 408/409/425/429, and HTTP 5xx;
 - do not retry deterministic client errors such as HTTP 400, 401, 403, or 404 with an unchanged request;
 - preserve the sanitized first error in debug history;
-- only append the validation-correction prompt after a local Pydantic `ValidationError`, not after a provider parameter error.
+- append a raw-output-free correction prompt after local JSON-envelope, non-object, or Pydantic validation failures, not after a provider parameter/response-mapping error.
 
 If a future client error is recoverable only by changing request parameters, implement that as an explicit, tested capability adapter. Do not silently mutate and retry arbitrary requests based on error-message text.
 
@@ -142,5 +142,6 @@ For every Google SDK/API/model compatibility change:
 8. Run a real opt-in smoke test against every exact model whose special capability behavior is claimed. Never use private camera imagery without explicit authorization.
 9. Confirm deterministic 4xx failures stop after one attempt and remain readable in history.
 10. Verify usage normalization against the installed SDK's real response object and retain raw provider usage fields for audit.
+11. Verify `client.aio.interactions.create()` remains an async method, timeout cancellation reaches it, and both async and sync client transports close cleanly.
 
 A model/API feature is not “cross-model supported” merely because the SDK accepts the Python argument. The claim is valid only when the target model accepts it in a real request and the repository has a safe fallback for models whose capability is unknown.

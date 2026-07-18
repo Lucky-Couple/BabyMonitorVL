@@ -6,7 +6,7 @@ Application versions use SemVer. Prompt and analysis schema versions are indepen
 
 Do not publish directly from an uncommitted working directory. Build from a clean, reviewed commit and record the image digest.
 
-For `0.1.x`, the supported product artifact is the Docker image containing FFmpeg, FastAPI, and the built React application. The Python wheel contains only the backend package and is not a standalone product artifact.
+For `0.x`, the supported product artifact is the Docker image containing FFmpeg, FastAPI, and the built React application. The Python wheel contains only the backend package and is not a standalone product artifact.
 
 ## Pre-release decisions
 

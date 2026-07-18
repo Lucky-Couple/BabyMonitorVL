@@ -58,6 +58,10 @@ Store provider text byte-for-character before parsing. Compatibility parsing may
 
 Retry only failures that can plausibly change without changing the request: network faults, timeouts, rate limits, server errors, and local generation/validation failures allowed by the product contract. Do not replay deterministic HTTP 4xx payload errors. If recovery needs a different request, implement a named compatibility branch with tests rather than matching human-readable error text at runtime.
 
+When retrying model output, distinguish provider failures from local parsing. JSON-envelope, non-object, and application-schema failures may receive a fixed correction code and JSON-only reminder. Do not attach validation prompts to SDK response-mapping errors or echo raw model text into a retry.
+
+Prefer a provider SDK's native async request API. Wrapping a synchronous HTTP call in `asyncio.to_thread()` does not stop the worker when the awaiting task is canceled or times out. Native async calls must receive the configured request timeout, remain under an outer coroutine timeout, and have a cancellation regression test.
+
 Record every completed response's usage, including failed local validation attempts. Token totals are cost/debug accounting for all calls, not only successful frames.
 
 ### Treat secrets as provider-owned data
@@ -73,7 +77,7 @@ Coordinate order is a model-family transport capability, not a frontend guess. R
 Every compatibility fix should leave evidence at the cheapest layer that could have prevented it:
 
 1. Pure unit tests for schema conversion, usage normalization, error classification, envelope parsing, and coordinate conversion, including negative assertions for fields that must be absent.
-2. Mocked provider tests asserting the exact serialized request and response-field mapping.
+2. Mocked provider tests asserting the exact serialized request, response-field mapping, native async cancellation, and sync/async client cleanup.
 3. Monitor/API tests for prepared-schema audit fidelity, retry count, secret redaction, session/provider replacement, raw-response preservation, and token aggregation.
 4. Frontend typecheck/build plus UI smoke for model selection, credential state, debug JSON, exact-frame overlays, and history.
 5. Opt-in real-provider ladder for exact affected model identifiers. Real calls confirm compatibility claims but never replace deterministic offline tests.

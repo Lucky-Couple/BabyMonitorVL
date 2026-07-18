@@ -18,6 +18,10 @@ class BoxCoordinateOrder(str, Enum):
 CANONICAL_BOX_ORDER = BoxCoordinateOrder.YXYX
 
 
+class ModelOutputError(ValueError):
+    """The decoded model payload cannot be interpreted as an analysis object."""
+
+
 def model_box_order(provider: ProviderName, model: str) -> BoxCoordinateOrder:
     """Return the native grounding convention for a provider/model pair.
 
@@ -88,7 +92,7 @@ def parse_model_analysis(raw_response: str, order: BoxCoordinateOrder) -> FrameA
 
     payload = decode_model_json_object(raw_response)
     if not isinstance(payload, dict):
-        raise ValueError("model response must be a JSON object")
+        raise ModelOutputError("model response must be a JSON object")
     return FrameAnalysis.model_validate(normalize_analysis_payload(payload, order))
 
 

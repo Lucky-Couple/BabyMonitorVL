@@ -3,7 +3,13 @@
 .venv
 __pycache__
 .pytest_cache
+.ruff_cache
+.mypy_cache
+.coverage
+htmlcov
 frontend/node_modules
 frontend/dist
+frontend/.pnpm-store
 tests
+docs
 .env
