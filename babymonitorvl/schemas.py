@@ -3,7 +3,7 @@ from __future__ import annotations
 from enum import Enum
 from typing import Annotated, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, RootModel, field_validator, model_validator
+from pydantic import BaseModel, ConfigDict, Field, RootModel, SecretStr, field_validator, model_validator
 
 
 class BoundingBox(RootModel[list[int]]):
@@ -139,6 +139,12 @@ class FrameAnalysis(BaseModel):
 class ProviderName(str, Enum):
     OLLAMA = "ollama"
     GEMINI = "gemini"
+
+
+class GeminiKeyRequest(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    api_key: SecretStr = Field(min_length=1, max_length=4096)
 
 
 class MonitorStartRequest(BaseModel):

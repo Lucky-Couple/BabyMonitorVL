@@ -20,7 +20,7 @@ from .ffmpeg import build_ffmpeg_command, collect_stderr, jpeg_dimensions, read_
 from .history import HistoryRecord, HistoryStore
 from .prompt import PROMPT_VERSION, build_prompt, output_schema
 from .providers import AnalysisRequest, VisionBackend
-from .providers.base import aggregate_usage, token_count
+from .providers.base import aggregate_usage, should_retry_provider_error, token_count
 from .schemas import FrameAnalysis, MonitorStartRequest, ProviderName
 
 
@@ -42,6 +42,16 @@ def redact_url(value: str) -> str:
         return urlunsplit((parsed.scheme, host, parsed.path, query, ""))
     except Exception:
         return "rtsp://***"
+
+
+def redact_sensitive_text(value: str, secrets: tuple[str, ...]) -> str:
+    """Remove exact non-empty provider secrets before text reaches history or APIs."""
+
+    result = value
+    for secret in secrets:
+        if secret:
+            result = result.replace(secret, "***")
+    return result
 
 
 def version_at_least(version: str | None, minimum: tuple[int, int, int]) -> bool:
@@ -135,7 +145,8 @@ class MonitorService:
             provider = self.providers[config.provider]
             health = await provider.healthcheck()
             if not health.available:
-                raise RuntimeError(health.detail)
+                detail = redact_sensitive_text(health.detail, provider.sensitive_values())
+                raise RuntimeError(detail)
             if config.provider is ProviderName.OLLAMA and model not in health.models:
                 raise RuntimeError(f"Ollama model is not installed: {model}")
             if (
@@ -166,6 +177,21 @@ class MonitorService:
             self._analysis_task = asyncio.create_task(self._analysis_loop(session_id), name="frame-analysis")
         await self._publish_status()
         return {"session_id": session_id, "model": model}
+
+    async def replace_provider(self, name: ProviderName, provider: VisionBackend) -> VisionBackend:
+        """Atomically replace an idle provider and return the previous instance."""
+
+        async with self._lock:
+            if self._session_id is not None:
+                raise RuntimeError("stop the active monitor session before changing provider credentials")
+            previous = self.providers[name]
+            self.providers[name] = provider
+            return previous
+
+    async def require_idle(self) -> None:
+        async with self._lock:
+            if self._session_id is not None:
+                raise RuntimeError("stop the active monitor session before changing provider credentials")
 
     async def stop(self) -> None:
         async with self._lock:
@@ -308,9 +334,11 @@ class MonitorService:
         box_order = model_box_order(config.provider, model)
         schema = output_schema(box_order)
         prompt = build_prompt(schema, box_order)
+        transport_schema = provider.prepare_output_schema(schema)
         generation_params = {
             "temperature": 0,
-            "thinking": "minimal/disabled",
+            "thinking": "disabled" if config.provider is ProviderName.OLLAMA else "provider_default",
+            "schema_profile": provider.schema_profile,
             "model_box_order": box_order.value,
             "canonical_box_order": CANONICAL_BOX_ORDER.value,
         }
@@ -328,7 +356,7 @@ class MonitorService:
                 image_height=frame.height,
                 prompt_version=PROMPT_VERSION,
                 prompt=prompt,
-                output_schema=schema,
+                output_schema=transport_schema,
                 generation_params=generation_params,
             )
             await self.history.add(record)
@@ -343,7 +371,7 @@ class MonitorService:
                 width=frame.width,
                 height=frame.height,
                 prompt=prompt,
-                output_schema=schema,
+                output_schema=transport_schema,
                 model=model,
                 generation_params=generation_params,
             )
@@ -369,9 +397,10 @@ class MonitorService:
                         raise
                     except Exception as exc:
                         safe_error = str(exc).replace(config.rtsp_url, redact_url(config.rtsp_url))
-                        if self.settings.gemini_api_key:
-                            safe_error = safe_error.replace(self.settings.gemini_api_key, "***")
+                        safe_error = redact_sensitive_text(safe_error, provider.sensitive_values())
                         errors.append(f"attempt {attempts}: {type(exc).__name__}: {safe_error}")
+                        if not should_retry_provider_error(exc):
+                            break
                         if attempts == 1 and isinstance(exc, ValidationError):
                             issues = []
                             for item in exc.errors(include_input=False):

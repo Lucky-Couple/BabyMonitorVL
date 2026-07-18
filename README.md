@@ -9,7 +9,7 @@ BabyMonitorVL 是一个使用多模态大语言模型分析 RTSP 婴儿监控画
 ## 功能
 
 - 单路 RTSP，默认每秒抽取 1 帧，可配置 `0.1–10 FPS`。
-- Ollama 本地模型和 Gemini Studio API 两种实现。
+- Ollama 本地模型和 Google AI Studio API 两种实现；云端列表包含兼容的 Gemini 与 Gemma 4 图像输入模型。
 - 单槽 latest-frame 队列：模型慢时覆盖旧的待分析帧，不累积实时延迟。
 - 实时抽帧预览、与结果严格对齐的标注画面、结构化分析和原始响应审计。
 - 独立检测画面中的真实家猫，返回猫框、置信度以及与婴儿的距离关系，并在主画面和历史缩略图中叠加紫色框。
@@ -28,13 +28,13 @@ docker compose up --build
 
 访问 <http://127.0.0.1:8000>。容器已包含 FFmpeg，并通过 `host.docker.internal:11434` 访问宿主机 Ollama。Qwen3-VL 需要 Ollama 0.12.7 或更高版本。
 
-Gemini 模式需在 `.env` 中配置：
+Gemini Key 可以在页面右上角的设置 Dialog 中临时配置，也可以在 `.env` 中提供启动默认值：
 
 ```dotenv
 GEMINI_API_KEY=your_api_key
 ```
 
-Gemini 模式会将所选采样帧发送给 Google API，页面也会显示这一提示。
+网页提交的 Key 会先通过 Google API 验证，只保存在后端进程内存中，既不写入浏览器存储或历史，也不会由 API 返回；服务重启后恢复 `.env` 中的启动配置。Gemini 模式会将所选采样帧发送给 Google API，页面也会显示这一提示。由于服务没有用户认证，只应通过默认的本机地址或可信 HTTPS 连接配置 Key。
 
 ## 本地开发
 
@@ -64,7 +64,7 @@ uv run uvicorn babymonitorvl.main:app --host 127.0.0.1 --port 8000
 | 环境变量 | 默认值 | 说明 |
 |---|---:|---|
 | `OLLAMA_BASE_URL` | `http://localhost:11434` | Ollama API 地址；Docker 中使用 host.docker.internal |
-| `GEMINI_API_KEY` | 空 | Gemini Studio API key，只在后端读取 |
+| `GEMINI_API_KEY` | 空 | Gemini Studio API key 启动默认值；可由网页内存配置临时覆盖 |
 | `DEFAULT_OLLAMA_MODEL` | `qwen3-vl:4b` | Ollama 默认模型 |
 | `DEFAULT_GEMINI_MODEL` | `gemini-3.5-flash` | Gemini 默认模型 |
 | `MODEL_TIMEOUT_SECONDS` | `60` | 单次模型调用超时 |
@@ -77,9 +77,12 @@ RTSP 地址、FPS、provider、model、TCP/UDP 和图像长边上限可在页面
 
 API 与前端统一使用 Gemini 风格的 `[ymin, xmin, ymax, xmax]`（归一化到 `0..1000`）。模型请求会按模型原生约定生成 Prompt 和 Schema；Ollama 中模型名匹配 `qwen*` 的整个 Qwen 系列统一使用 `[xmin, ymin, xmax, ymax]`，后端在校验和保存结果前转换为统一格式。原始响应保持不变，模型坐标顺序和统一坐标顺序会记录在历史详情的调用参数中。
 
+完整分析契约由同一份 Pydantic Schema 生成。Ollama 直接接收完整 Schema；Gemini Studio 后端会把它转换为 Google AI 支持的结构化输出子集后再发送，完整约束仍保留在 Prompt 和本地 Pydantic 校验中。该兼容层同时适用于通过 Gemini Studio 调用的 Gemini 与 Gemma 模型。
+
 ## API 摘要
 
 - `GET /api/providers`
+- `PUT /api/providers/gemini/key`、`DELETE /api/providers/gemini/key`
 - `POST /api/monitor/start`
 - `POST /api/monitor/stop`
 - `GET /api/monitor/status`
@@ -106,6 +109,8 @@ pnpm --dir frontend typecheck
 - [架构与数据流](docs/ARCHITECTURE.md)
 - [开发环境与测试命令](docs/DEVELOPMENT.md)
 - [分析 Schema、Prompt、坐标与 Provider 契约](docs/ANALYSIS_CONTRACT.md)
+- [Provider 兼容问题的分层诊断与防回归方法](docs/PROVIDER_COMPATIBILITY.md)
+- [Gemini/Gemma Provider 兼容性与防回归规范](docs/GEMINI_PROVIDER.md)
 - [版本发布清单](docs/RELEASE.md)
 - [变更记录](CHANGELOG.md)
 

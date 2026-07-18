@@ -25,8 +25,9 @@ The MVP intentionally uses a multimodal LLM/VLM for all semantic visual interpre
 - API and UI coordinates are always canonical `[ymin, xmin, ymax, xmax]`, integer normalized to `0..1000`.
 - Ollama model basenames matching `qwen*` use model-native `[xmin, ymin, xmax, ymax]`; convert every box to canonical order before Pydantic validation and API/history exposure. Gemini and unknown model families use canonical order unless a tested model adapter says otherwise.
 - Never silently clamp, reorder, deduplicate, smooth, or fabricate model boxes. Invalid model output must fail validation and be visible in debug history.
+- Preserve provider raw responses byte-for-character in history. Parsing may tolerate only one JSON value with an optional `json`/empty Markdown fence wrapper; never discard prose, accept a second JSON value, or use greedy substring extraction to hide malformed output.
 
-See [Architecture](docs/ARCHITECTURE.md) and [Analysis contract](docs/ANALYSIS_CONTRACT.md) before touching scheduling, schemas, prompts, providers, or coordinates.
+See [Architecture](docs/ARCHITECTURE.md), [Analysis contract](docs/ANALYSIS_CONTRACT.md), [provider compatibility method](docs/PROVIDER_COMPATIBILITY.md), and [Gemini/Gemma provider rules](docs/GEMINI_PROVIDER.md) before touching scheduling, schemas, prompts, providers, or coordinates.
 
 ## Repository map
 
@@ -90,14 +91,17 @@ Before handoff:
 - A semantic prompt change requires a new `PROMPT_VERSION` and snapshot assertions.
 - A breaking or required-field schema change requires a new `schema_version`, synchronized frontend types, provider tests, coordinate tests for every box field, API tests, and changelog entry.
 - Provider adapters may translate transport and structured-output mechanics. They must not append provider-specific semantic instructions.
+- Provider schema compatibility belongs in `VisionBackend.prepare_output_schema()`. Ollama keeps the complete Pydantic schema; Gemini must use the smoke-validated `google-ai-structured-output-compact-v1` representation while retaining the complete schema in the prompt and `FrameAnalysis` validation. Never bypass or broaden the compact projection merely because a keyword works in isolation; require the evidence and tests in `docs/GEMINI_PROVIDER.md`.
 - Keep temperature at zero unless an explicit experiment changes the comparison baseline.
-- Ollama sends `think=false`. Gemini uses minimal thinking. If a provider reports thinking tokens, count them as output tokens.
-- Retry at most once. Preserve both raw responses and validation errors for debugging.
+- Ollama sends `think=false`. Gemini omits `thinking_level` for the dynamic model list and uses the provider/model default. Never add a Gemini thinking override without the capability adapter, evidence, fallback, and tests required by `docs/GEMINI_PROVIDER.md`. If a provider reports thinking tokens, count them as output tokens.
+- Retry at most once for transient/unclassified failures and local validation failures. Do not replay deterministic provider HTTP 4xx errors with an unchanged request. Preserve raw responses and errors for debugging.
 - Treat model hallucinations as visible model output. Improve the shared prompt or contract; do not hide failures with conventional CV post-processing.
 
 ## Provider changes
 
 A new backend must implement `VisionBackend.healthcheck()`, `analyze()`, and `close()`; return raw output plus standardized token usage; enforce the shared prompt/schema; keep API keys server-side; and include offline mocked tests for request mapping, model listing, timeout/error behavior, usage normalization, and raw-response preservation.
+
+For Gemini/Gemma specifically, SDK-level field availability is not evidence of model-level support. Follow [Gemini/Gemma provider rules](docs/GEMINI_PROVIDER.md); unknown models must use the portable baseline with optional model-specific fields omitted. Every Google transport schema must pass the full-project allowlist traversal test.
 
 Adding a model-family coordinate exception requires:
 
@@ -109,7 +113,7 @@ Adding a model-family coordinate exception requires:
 ## Security and privacy
 
 - Never commit or paste real RTSP credentials, API keys, camera IPs, captured images, or household details into source, fixtures, docs, logs, screenshots, or changelogs.
-- `GEMINI_API_KEY` is read only from the backend environment and must never be returned by an API.
+- Gemini credentials may come from the backend environment or the web settings endpoint. Web values must remain process-memory-only, must be validated before replacing the active provider, and must never enter browser storage, history, logs, errors, events, or API responses. Credential replacement is allowed only while monitoring is stopped.
 - Redact RTSP username, password, and every query value before status, history, events, errors, or logs.
 - The frontend keeps the RTSP draft in browser `sessionStorage` only so provider/model changes do not clear it. Do not move it to persistent storage without an explicit privacy decision.
 - Gemini sends selected frames to Google. Any Gemini UI or workflow must keep that privacy difference clear.

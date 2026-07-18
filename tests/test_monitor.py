@@ -1,8 +1,15 @@
 import asyncio
 from datetime import timezone
 
-from babymonitorvl.monitor import CapturedFrame, offer_latest, redact_url, utc_now, version_at_least
-from babymonitorvl.providers.base import aggregate_usage
+from babymonitorvl.monitor import (
+    CapturedFrame,
+    offer_latest,
+    redact_sensitive_text,
+    redact_url,
+    utc_now,
+    version_at_least,
+)
+from babymonitorvl.providers.base import aggregate_usage, should_retry_provider_error
 
 
 def frame(sequence: int) -> CapturedFrame:
@@ -42,3 +49,24 @@ def test_usage_aggregation_counts_all_attempts() -> None:
     assert usage["output_tokens"] == 50
     assert usage["total_tokens"] == 260
     assert len(usage["attempts"]) == 2
+
+
+def test_deterministic_provider_client_errors_are_not_retried() -> None:
+    bad_request = RuntimeError("unsupported model parameter")
+    bad_request.status_code = 400  # type: ignore[attr-defined]
+    assert should_retry_provider_error(bad_request) is False
+
+
+def test_transient_and_unclassified_provider_errors_are_retried() -> None:
+    rate_limited = RuntimeError("rate limited")
+    rate_limited.code = 429  # type: ignore[attr-defined]
+    unavailable = RuntimeError("unavailable")
+    unavailable.response = type("Response", (), {"status_code": 503})()  # type: ignore[attr-defined]
+    assert should_retry_provider_error(rate_limited) is True
+    assert should_retry_provider_error(unavailable) is True
+    assert should_retry_provider_error(ValueError("invalid JSON")) is True
+
+
+def test_provider_secrets_are_removed_from_public_error_text() -> None:
+    secret = "runtime-provider-secret"
+    assert redact_sensitive_text(f"request failed for key {secret}", (secret,)) == "request failed for key ***"

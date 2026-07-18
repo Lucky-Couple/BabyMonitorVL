@@ -281,6 +281,11 @@ export default function App() {
   const [maxEdge, setMaxEdge] = useState(1280);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [geminiKey, setGeminiKey] = useState("");
+  const [geminiKeyVisible, setGeminiKeyVisible] = useState(false);
+  const [geminiKeyBusy, setGeminiKeyBusy] = useState(false);
+  const [geminiKeyError, setGeminiKeyError] = useState<string | null>(null);
+  const geminiDialogRef = useRef<HTMLDialogElement>(null);
   const reconnectTimer = useRef<number | null>(null);
   const loadedOlderHistory = useRef(false);
 
@@ -377,6 +382,66 @@ export default function App() {
     writeRtspDraft(value);
   };
 
+  const updateGeminiProvider = (info: ProviderInfo) => {
+    setProviders((current) => current ? { ...current, gemini: info } : current);
+    if (provider === "gemini") {
+      setModel((current) => info.models.includes(current) ? current : (info.models[0] ?? info.default_model));
+    }
+  };
+
+  const openGeminiSettings = () => {
+    setGeminiKey("");
+    setGeminiKeyVisible(false);
+    setGeminiKeyError(null);
+    geminiDialogRef.current?.showModal();
+  };
+
+  const closeGeminiSettings = () => {
+    if (geminiKeyBusy) return;
+    setGeminiKey("");
+    setGeminiKeyError(null);
+    geminiDialogRef.current?.close();
+  };
+
+  async function saveGeminiKey(event: FormEvent) {
+    event.preventDefault();
+    setGeminiKeyBusy(true);
+    setGeminiKeyError(null);
+    try {
+      const response = await fetch("/api/providers/gemini/key", {
+        method: "PUT",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ api_key: geminiKey }),
+      });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail ?? "Gemini Key 验证失败");
+      updateGeminiProvider(body);
+      setGeminiKey("");
+      geminiDialogRef.current?.close();
+    } catch (reason) {
+      setGeminiKeyError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setGeminiKeyBusy(false);
+    }
+  }
+
+  async function resetGeminiKey() {
+    setGeminiKeyBusy(true);
+    setGeminiKeyError(null);
+    try {
+      const response = await fetch("/api/providers/gemini/key", { method: "DELETE" });
+      const body = await response.json();
+      if (!response.ok) throw new Error(body.detail ?? "恢复 Gemini Key 配置失败");
+      updateGeminiProvider(body);
+      setGeminiKey("");
+      geminiDialogRef.current?.close();
+    } catch (reason) {
+      setGeminiKeyError(reason instanceof Error ? reason.message : String(reason));
+    } finally {
+      setGeminiKeyBusy(false);
+    }
+  }
+
   async function start(event: FormEvent) {
     event.preventDefault();
     setBusy(true);
@@ -428,8 +493,14 @@ export default function App() {
           <div className="eyebrow">VISION LANGUAGE MONITOR</div>
           <h1>BabyMonitor<span>VL</span></h1>
         </div>
-        <div className={`connection-state state-${status.state}`}>
-          <i />{status.state === "streaming" ? "监控中" : status.state === "stopped" ? "已停止" : status.state === "reconnecting" ? "正在重连" : "正在连接"}
+        <div className="topbar-actions">
+          <button className="gemini-key-button" type="button" onClick={openGeminiSettings}>
+            <i className={providers?.gemini.key_configured ? "configured" : "unconfigured"} />
+            Gemini Key
+          </button>
+          <div className={`connection-state state-${status.state}`}>
+            <i />{status.state === "streaming" ? "监控中" : status.state === "stopped" ? "已停止" : status.state === "reconnecting" ? "正在重连" : "正在连接"}
+          </div>
         </div>
       </header>
 
@@ -491,9 +562,73 @@ export default function App() {
             <span key={name} className={info.available ? "healthy" : "unhealthy"}><i />{name === "ollama" ? "Ollama" : "Gemini"}: {info.detail}{info.version ? ` · ${info.version}` : ""}</span>
           ))}
         </div>
-        {provider === "gemini" && <div className="cloud-warning">Gemini 模式会将采样帧发送至 Google API。</div>}
         {error && <div className="error-banner">{error}</div>}
       </section>
+
+      <dialog
+        className="gemini-dialog"
+        ref={geminiDialogRef}
+        onCancel={(event) => {
+          event.preventDefault();
+          if (!geminiKeyBusy) closeGeminiSettings();
+        }}
+        onClick={(event) => {
+          if (event.target === geminiDialogRef.current) closeGeminiSettings();
+        }}
+      >
+        <form onSubmit={saveGeminiKey}>
+          <div className="dialog-heading">
+            <div>
+              <span className="eyebrow">CLOUD PROVIDER</span>
+              <h2>Gemini API Key</h2>
+            </div>
+            <button className="dialog-close" type="button" onClick={closeGeminiSettings} disabled={geminiKeyBusy} aria-label="关闭">×</button>
+          </div>
+          <div className={`key-status ${providers?.gemini.key_configured ? "configured" : "unconfigured"}`}>
+            <i />
+            <span>
+              {providers?.gemini.key_source === "web"
+                ? "正在使用网页临时配置"
+                : providers?.gemini.key_source === "environment"
+                  ? "正在使用环境变量配置"
+                  : "尚未配置 Gemini Key"}
+            </span>
+          </div>
+          <p className="dialog-copy">Key 只保存在后端进程内存中，不会写入浏览器存储、历史记录或 API 响应。服务重启后，网页配置会消失。</p>
+          <label className="dialog-field">
+            <span>新的 Gemini API Key</span>
+            <div className="secret-input">
+              <input
+                data-testid="gemini-key-input"
+                type={geminiKeyVisible ? "text" : "password"}
+                value={geminiKey}
+                onChange={(event) => setGeminiKey(event.target.value)}
+                autoComplete="off"
+                autoCapitalize="none"
+                spellCheck={false}
+                placeholder="粘贴 Google AI Studio API Key"
+                disabled={geminiKeyBusy || active}
+                required
+              />
+              <button type="button" onClick={() => setGeminiKeyVisible((visible) => !visible)} disabled={geminiKeyBusy}>
+                {geminiKeyVisible ? "隐藏" : "显示"}
+              </button>
+            </div>
+          </label>
+          <div className="dialog-privacy">使用 Gemini 或 Gemma 云端模型时，采样帧会发送至 Google API。保存前会连接 Google API 验证 Key 并刷新可用模型；仅应在本机或可信 HTTPS 连接中提交。</div>
+          {active && <div className="dialog-error">请先停止当前监控会话，再更换 Gemini Key。</div>}
+          {geminiKeyError && <div className="dialog-error">{geminiKeyError}</div>}
+          <div className="dialog-actions">
+            {providers?.gemini.key_source === "web" && (
+              <button className="reset-key" type="button" onClick={() => void resetGeminiKey()} disabled={geminiKeyBusy || active}>恢复启动配置</button>
+            )}
+            <button className="cancel-key" type="button" onClick={closeGeminiSettings} disabled={geminiKeyBusy}>取消</button>
+            <button className="save-key" type="submit" disabled={geminiKeyBusy || active || !geminiKey.trim()}>
+              {geminiKeyBusy ? "正在验证…" : "验证并使用"}
+            </button>
+          </div>
+        </form>
+      </dialog>
 
       <section className="metrics-grid">
         <div><span>已抽帧</span><strong>{status.capture_count}</strong></div>

@@ -91,11 +91,15 @@ Ollama adapter:
 Gemini adapter:
 
 - creates one interaction containing prompt text and base64 image;
-- uses JSON response format and minimal thinking;
-- lists only compatible Gemini generate-content model families and excludes embedding/image-generation/video/live/audio variants;
+- uses the google-genai 2.x Interactions schema, a single polymorphic JSON text response format, and `store=false` stateless requests;
+- converts the complete Pydantic schema through the Google AI structured-output subset adapter before transport; the complete schema stays in the prompt and `FrameAnalysis` remains the final validator;
+- omits the model-specific `thinking_level` field for the dynamic model list and uses the provider/model default; see [Gemini/Gemma provider rules](GEMINI_PROVIDER.md);
+- lists compatible Gemini models plus hosted Gemma 4 image-input models supported by the Interactions API, while excluding older/text-only Gemma and embedding/image-generation/video/live/audio variants;
 - counts thinking tokens as output tokens.
 
-The monitor retries once. Raw responses, per-attempt usage, and errors remain available in history. A validation failure receives a concise correction suffix on the second request; the shared baseline itself remains preserved in history.
+The monitor retries once for transient/unclassified provider failures and local validation failures. It does not replay a deterministic provider HTTP 4xx with an unchanged request. Raw responses, per-attempt usage, and errors remain available in history. A local validation failure receives a concise correction suffix on the second request; the shared baseline itself remains preserved in history.
+
+Model JSON parsing preserves every raw response unchanged in history. The validator accepts exactly one JSON value, optionally wrapped by a complete single empty/`json` Markdown code fence or followed only by an isolated closing fence. An opening fence without its closing fence is invalid. This narrow compatibility handles hosted models that append ` ``` ` despite structured-output mode. A second JSON value, prose, another fence block, or any other trailing content remains a visible parse failure; the parser never searches greedily for a convenient object.
 
 ## Frontend overlay contract
 

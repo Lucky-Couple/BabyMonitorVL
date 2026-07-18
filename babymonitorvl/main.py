@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import asyncio
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
@@ -15,10 +14,11 @@ from . import __version__
 from .config import Settings
 from .events import EventHub
 from .history import HistoryStore
-from .monitor import MonitorService
+from .monitor import MonitorService, redact_sensitive_text
 from .prompt import PROMPT_VERSION, build_prompt, output_schema
 from .providers import GeminiBackend, OllamaBackend
-from .schemas import MonitorStartRequest, ProviderName
+from .providers.base import ProviderHealth
+from .schemas import GeminiKeyRequest, MonitorStartRequest, ProviderName
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -27,7 +27,11 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     history = HistoryStore(settings.history_max_bytes)
     providers = {
         ProviderName.OLLAMA: OllamaBackend(settings.ollama_base_url, settings.model_timeout_seconds),
-        ProviderName.GEMINI: GeminiBackend(settings.gemini_api_key, settings.model_timeout_seconds),
+        ProviderName.GEMINI: GeminiBackend(
+            settings.gemini_api_key,
+            settings.model_timeout_seconds,
+            key_source="environment" if settings.gemini_api_key else "none",
+        ),
     }
     monitor = MonitorService(settings, history, events, providers)
 
@@ -58,25 +62,75 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             errors.append(sanitized)
         return JSONResponse(status_code=422, content={"detail": errors})
 
+    def provider_info(name: ProviderName, health: ProviderHealth) -> dict[str, Any]:
+        provider = providers[name]
+        default_model = (
+            settings.default_ollama_model if name is ProviderName.OLLAMA else settings.default_gemini_model
+        )
+        models = health.models or [default_model]
+        result = {
+            "available": health.available,
+            "detail": redact_sensitive_text(health.detail, provider.sensitive_values()),
+            "models": models,
+            "default_model": default_model,
+            "version": health.version,
+            "cloud": name is ProviderName.GEMINI,
+            "models_dynamic": name is ProviderName.OLLAMA or health.available,
+        }
+        if name is ProviderName.GEMINI:
+            gemini = providers[ProviderName.GEMINI]
+            result["key_configured"] = bool(getattr(gemini, "api_key", None))
+            result["key_source"] = getattr(gemini, "key_source", "none")
+        return result
+
     @app.get("/api/providers")
     async def get_providers() -> dict[str, Any]:
-        healths = await asyncio.gather(*(provider.healthcheck() for provider in providers.values()))
-        result: dict[str, Any] = {}
-        for (name, _), health in zip(providers.items(), healths, strict=True):
-            default_model = (
-                settings.default_ollama_model if name is ProviderName.OLLAMA else settings.default_gemini_model
-            )
-            models = health.models or [default_model]
-            result[name.value] = {
-                "available": health.available,
-                "detail": health.detail,
-                "models": models,
-                "default_model": default_model,
-                "version": health.version,
-                "cloud": name is ProviderName.GEMINI,
-                "models_dynamic": name is ProviderName.OLLAMA or health.available,
-            }
-        return result
+        provider_items = list(providers.items())
+        healths = await asyncio.gather(*(provider.healthcheck() for _, provider in provider_items))
+        return {
+            name.value: provider_info(name, health)
+            for (name, _), health in zip(provider_items, healths, strict=True)
+        }
+
+    @app.put("/api/providers/gemini/key")
+    async def configure_gemini_key(payload: GeminiKeyRequest) -> dict[str, Any]:
+        try:
+            await monitor.require_idle()
+        except RuntimeError as exc:
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        candidate = GeminiBackend(
+            payload.api_key.get_secret_value(),
+            settings.model_timeout_seconds,
+            key_source="web",
+        )
+        health = await candidate.healthcheck()
+        if not health.available:
+            await asyncio.gather(candidate.close(), return_exceptions=True)
+            detail = redact_sensitive_text(health.detail, candidate.sensitive_values())
+            raise HTTPException(status_code=400, detail=detail)
+        try:
+            previous = await monitor.replace_provider(ProviderName.GEMINI, candidate)
+        except RuntimeError as exc:
+            await asyncio.gather(candidate.close(), return_exceptions=True)
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await asyncio.gather(previous.close(), return_exceptions=True)
+        return provider_info(ProviderName.GEMINI, health)
+
+    @app.delete("/api/providers/gemini/key")
+    async def reset_gemini_key() -> dict[str, Any]:
+        candidate = GeminiBackend(
+            settings.gemini_api_key,
+            settings.model_timeout_seconds,
+            key_source="environment" if settings.gemini_api_key else "none",
+        )
+        try:
+            previous = await monitor.replace_provider(ProviderName.GEMINI, candidate)
+        except RuntimeError as exc:
+            await asyncio.gather(candidate.close(), return_exceptions=True)
+            raise HTTPException(status_code=409, detail=str(exc)) from exc
+        await asyncio.gather(previous.close(), return_exceptions=True)
+        health = await candidate.healthcheck()
+        return provider_info(ProviderName.GEMINI, health)
 
     @app.post("/api/monitor/start", status_code=201)
     async def start_monitor(payload: MonitorStartRequest) -> dict[str, Any]:

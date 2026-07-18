@@ -86,7 +86,38 @@ def normalize_analysis_payload(payload: dict[str, Any], order: BoxCoordinateOrde
 def parse_model_analysis(raw_response: str, order: BoxCoordinateOrder) -> FrameAnalysis:
     """Parse a model response and expose canonical coordinates to consumers."""
 
-    payload = json.loads(raw_response)
+    payload = decode_model_json_object(raw_response)
     if not isinstance(payload, dict):
         raise ValueError("model response must be a JSON object")
     return FrameAnalysis.model_validate(normalize_analysis_payload(payload, order))
+
+
+def decode_model_json_object(raw_response: str) -> Any:
+    """Decode one JSON value while tolerating only a Markdown fence wrapper.
+
+    Some hosted models append a closing code fence even when structured JSON
+    output is requested. Raw provider output remains unchanged in history; this
+    parser removes no prose and never accepts a second JSON value.
+    """
+
+    text = raw_response.lstrip()
+    opened_fence = False
+    if text.startswith("```"):
+        first_line_end = text.find("\n")
+        if first_line_end < 0:
+            raise json.JSONDecodeError("Markdown fence does not contain JSON", text, 0)
+        fence_language = text[3:first_line_end].strip().casefold()
+        if fence_language not in {"", "json"}:
+            raise json.JSONDecodeError("Unsupported Markdown fence language", text, 3)
+        text = text[first_line_end + 1 :]
+        opened_fence = True
+
+    payload, end = json.JSONDecoder().raw_decode(text)
+    trailing = text[end:].strip()
+    if trailing == "```":
+        trailing = ""
+    elif opened_fence:
+        raise json.JSONDecodeError("Markdown fence is not closed", text, end)
+    if trailing:
+        raise json.JSONDecodeError("Extra data", text, end)
+    return payload

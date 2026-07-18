@@ -14,7 +14,7 @@ class AnalysisRequest:
     width: int
     height: int
     prompt: str
-    output_schema: dict[str, Any]
+    output_schema: dict[str, Any]  # Provider transport schema, prepared before audit/history storage.
     model: str
     generation_params: dict[str, Any]
 
@@ -45,6 +45,28 @@ def aggregate_usage(attempts: list[dict[str, Any]]) -> dict[str, Any]:
     }
 
 
+def provider_error_status_code(exc: Exception) -> int | None:
+    """Extract an HTTP status code without depending on a provider SDK type."""
+
+    for candidate in (
+        getattr(exc, "status_code", None),
+        getattr(exc, "code", None),
+        getattr(getattr(exc, "response", None), "status_code", None),
+    ):
+        if isinstance(candidate, int) and not isinstance(candidate, bool):
+            return candidate
+    return None
+
+
+def should_retry_provider_error(exc: Exception) -> bool:
+    """Retry transient/unknown failures, but never replay deterministic HTTP 4xx."""
+
+    status_code = provider_error_status_code(exc)
+    if status_code is None:
+        return True
+    return status_code in {408, 409, 425, 429} or status_code >= 500
+
+
 @dataclass(slots=True)
 class ProviderHealth:
     available: bool
@@ -55,6 +77,17 @@ class ProviderHealth:
 
 class VisionBackend(ABC):
     name: ProviderName
+    schema_profile = "unmodified"
+
+    def prepare_output_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
+        """Adapt the validation schema to the provider's transport contract."""
+
+        return schema
+
+    def sensitive_values(self) -> tuple[str, ...]:
+        """Return exact provider secrets that must be removed from public errors."""
+
+        return ()
 
     @abstractmethod
     async def healthcheck(self) -> ProviderHealth: ...

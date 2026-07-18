@@ -5,8 +5,10 @@ from pydantic import ValidationError
 
 from babymonitorvl.coordinates import (
     BoxCoordinateOrder,
+    decode_model_json_object,
     model_box_order,
     normalize_analysis_payload,
+    parse_model_analysis,
 )
 from babymonitorvl.prompt import PROMPT_VERSION, build_prompt, output_schema
 from babymonitorvl.schemas import BoundingBox, FrameAnalysis, ProviderName
@@ -33,6 +35,41 @@ def test_empty_scene_requires_unknown_risk() -> None:
     valid["overall_risk"] = "normal"
     with pytest.raises(ValidationError):
         FrameAnalysis.model_validate(valid)
+
+
+def test_model_json_parser_accepts_only_optional_markdown_fence_wrapper() -> None:
+    payload = {
+        "schema_version": "1.1",
+        "summary": "No infant is visible.",
+        "image_quality": "good",
+        "infants": [],
+        "cats": [],
+        "overall_risk": "unknown",
+        "risk_reasons": [],
+    }
+    encoded = json.dumps(payload)
+
+    assert decode_model_json_object(encoded + "\n```") == payload
+    assert decode_model_json_object("```json\n" + encoded + "\n```") == payload
+    assert parse_model_analysis(encoded + "\n```", BoxCoordinateOrder.YXYX).summary == payload["summary"]
+
+
+@pytest.mark.parametrize(
+    "suffix",
+    [
+        '\n{"second": true}',
+        "\nAnalysis complete.",
+        "\n```\nextra",
+    ],
+)
+def test_model_json_parser_rejects_non_fence_trailing_content(suffix: str) -> None:
+    with pytest.raises(json.JSONDecodeError):
+        decode_model_json_object('{"ok": true}' + suffix)
+
+
+def test_model_json_parser_rejects_unclosed_opening_fence() -> None:
+    with pytest.raises(json.JSONDecodeError, match="Markdown fence is not closed"):
+        decode_model_json_object('```json\n{"ok": true}')
 
 
 def test_prompt_embeds_exact_schema() -> None:

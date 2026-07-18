@@ -2,10 +2,84 @@ from __future__ import annotations
 
 import asyncio
 import base64
+from copy import deepcopy
 from typing import Any
 
 from ..schemas import ProviderName
 from .base import AnalysisRequest, ProviderCallResult, ProviderHealth, VisionBackend
+
+
+GEMINI_SCHEMA_PROFILE = "google-ai-structured-output-compact-v1"
+
+# Google AI structured output supports a documented subset of JSON Schema.
+# Keep this allowlist synchronized with docs/GEMINI_PROVIDER.md and its tests.
+GEMINI_SCHEMA_KEYWORDS = frozenset(
+    {
+        "additionalProperties",
+        "anyOf",
+        "enum",
+        "items",
+        "properties",
+        "required",
+        "type",
+    }
+)
+
+
+def gemini_compatible_schema(schema: dict[str, Any]) -> dict[str, Any]:
+    """Return a Google AI structured-output subset without weakening local validation.
+
+    Pydantic emits useful validation keywords that Google AI does not accept in
+    `response_format.schema`. The complete Pydantic schema remains in the prompt
+    and the response is still validated with the original Pydantic model.
+    """
+
+    definitions = schema.get("$defs")
+    definitions = definitions if isinstance(definitions, dict) else {}
+
+    def convert(node: dict[str, Any], depth: int, ref_stack: frozenset[str]) -> dict[str, Any]:
+        ref = node.get("$ref")
+        if isinstance(ref, str):
+            prefix = "#/$defs/"
+            if not ref.startswith(prefix) or ref in ref_stack:
+                raise ValueError(f"unsupported or recursive Gemini schema reference: {ref}")
+            target = definitions.get(ref.removeprefix(prefix))
+            if not isinstance(target, dict):
+                raise ValueError(f"unresolved Gemini schema reference: {ref}")
+            return convert(target, depth, ref_stack | {ref})
+
+        result: dict[str, Any] = {}
+
+        const_value = node.get("const")
+        if "const" in node and "enum" not in node:
+            result["enum"] = [deepcopy(const_value)]
+
+        for key, value in node.items():
+            if key not in GEMINI_SCHEMA_KEYWORDS:
+                continue
+            if key == "properties":
+                if isinstance(value, dict):
+                    result[key] = {
+                        str(name): convert(child, depth + 1, ref_stack)
+                        for name, child in value.items()
+                        if isinstance(child, dict)
+                    }
+            elif key == "anyOf":
+                if isinstance(value, list):
+                    result[key] = [
+                        convert(child, depth + 1, ref_stack) for child in value if isinstance(child, dict)
+                    ]
+            elif key == "items":
+                if isinstance(value, dict):
+                    result[key] = convert(value, depth + 1, ref_stack)
+            elif key == "additionalProperties":
+                if depth == 0 and isinstance(value, bool):
+                    result[key] = value
+            else:
+                result[key] = deepcopy(value)
+        return result
+
+    return convert(schema, 0, frozenset())
 
 
 def normalize_gemini_usage(raw_usage: dict[str, Any]) -> dict[str, Any]:
@@ -18,13 +92,27 @@ def normalize_gemini_usage(raw_usage: dict[str, Any]) -> dict[str, Any]:
                 return max(0, int(value))
         return 0
 
-    input_tokens = first_count("input_tokens", "input_token_count", "prompt_token_count")
+    input_tokens = first_count(
+        "input_tokens",
+        "total_input_tokens",
+        "input_token_count",
+        "prompt_token_count",
+    )
     direct_output_tokens = first_count("output_tokens", "output_token_count")
     if direct_output_tokens:
         output_tokens = direct_output_tokens
     else:
-        output_tokens = first_count("candidates_token_count", "candidate_token_count")
-        output_tokens += first_count("thoughts_token_count", "thinking_token_count")
+        output_tokens = first_count(
+            "total_output_tokens",
+            "response_token_count",
+            "candidates_token_count",
+            "candidate_token_count",
+        )
+        output_tokens += first_count(
+            "total_thought_tokens",
+            "thoughts_token_count",
+            "thinking_token_count",
+        )
     provider_total = first_count("total_tokens", "total_token_count")
     if provider_total > input_tokens + output_tokens:
         output_tokens = provider_total - input_tokens
@@ -40,11 +128,24 @@ def normalize_gemini_usage(raw_usage: dict[str, Any]) -> dict[str, Any]:
 
 class GeminiBackend(VisionBackend):
     name = ProviderName.GEMINI
+    schema_profile = GEMINI_SCHEMA_PROFILE
 
-    def __init__(self, api_key: str | None, timeout_seconds: float = 60.0) -> None:
+    def prepare_output_schema(self, schema: dict[str, Any]) -> dict[str, Any]:
+        return gemini_compatible_schema(schema)
+
+    def __init__(
+        self,
+        api_key: str | None,
+        timeout_seconds: float = 60.0,
+        key_source: str | None = None,
+    ) -> None:
         self.api_key = api_key
         self.timeout_seconds = timeout_seconds
+        self.key_source = key_source or ("environment" if api_key else "none")
         self._client: Any = None
+
+    def sensitive_values(self) -> tuple[str, ...]:
+        return (self.api_key,) if self.api_key else ()
 
     def _get_client(self) -> Any:
         if not self.api_key:
@@ -57,7 +158,7 @@ class GeminiBackend(VisionBackend):
 
     @staticmethod
     def _compatible_model_names(client: Any) -> list[str]:
-        """Return Gemini models compatible with this image-to-JSON workflow."""
+        """Return hosted Google models compatible with this image-to-JSON workflow."""
         excluded_variants = (
             "embedding",
             "imagen",
@@ -76,8 +177,9 @@ class GeminiBackend(VisionBackend):
             name = resource_name.removeprefix("models/")
             actions = getattr(model, "supported_actions", None) or []
             normalized_actions = {str(action).replace("_", "").lower() for action in actions}
+            supported_family = name.startswith("gemini-") or name.startswith("gemma-4-")
             if (
-                name.startswith("gemini-")
+                supported_family
                 and "generatecontent" in normalized_actions
                 and not any(marker in name.lower() for marker in excluded_variants)
             ):
@@ -117,15 +219,29 @@ class GeminiBackend(VisionBackend):
                 },
                 generation_config={
                     "temperature": request.generation_params.get("temperature", 0),
-                    "thinking_level": "minimal",
                 },
+                store=False,
             )
 
         response = await asyncio.wait_for(asyncio.to_thread(invoke), timeout=self.timeout_seconds)
         raw = getattr(response, "output_text", None)
         if not isinstance(raw, str):
             raise ValueError("Gemini response did not contain output_text")
-        usage_meta = getattr(response, "usage_metadata", None)
-        raw_usage = usage_meta.model_dump(mode="json") if hasattr(usage_meta, "model_dump") else {}
+        usage_meta = getattr(response, "usage", None) or getattr(response, "usage_metadata", None)
+        if hasattr(usage_meta, "model_dump"):
+            raw_usage = usage_meta.model_dump(mode="json")
+        elif isinstance(usage_meta, dict):
+            raw_usage = usage_meta
+        else:
+            raw_usage = {}
         usage = normalize_gemini_usage(raw_usage)
         return ProviderCallResult(raw_response=raw, usage=usage)
+
+    async def close(self) -> None:
+        client = self._client
+        self._client = None
+        if client is None:
+            return
+        close = getattr(client, "close", None)
+        if callable(close):
+            await asyncio.to_thread(close)

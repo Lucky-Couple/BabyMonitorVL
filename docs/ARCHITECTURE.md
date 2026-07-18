@@ -69,7 +69,9 @@ History intentionally:
 
 The main annotated image always references a completed/pending history record and therefore matches its boxes. The live preview uses `/api/live/image` and intentionally has no overlay. Never overlay the latest result on the latest capture: model latency makes them different frames.
 
-The frontend receives state through initial HTTP fetches plus `/api/events`. It can reconnect and refresh history. Debug details expose raw responses, the exact prompt/schema, generation settings, coordinate orders, errors, latency, attempts, and tokens.
+The frontend receives state through initial HTTP fetches plus `/api/events`. It can reconnect and refresh history. Debug details expose raw responses, the exact prompt, the provider transport schema, its schema profile, generation settings, coordinate orders, errors, latency, attempts, and tokens. For Gemini, the prompt contains the complete Pydantic schema while request history contains the Google-compatible transport representation; application validation still uses `FrameAnalysis`.
+
+Gemini credentials may originate from the backend environment or from the settings dialog. A web-submitted key is validated before use, retained only by the active backend object in process memory, and never returned to the browser. Provider replacement is serialized with session start: credentials cannot change while a monitor session is active. Resetting restores the startup environment value, and process restart always discards the web override.
 
 ## Failure model
 
@@ -82,7 +84,7 @@ The frontend receives state through initial HTTP fetches plus `/api/events`. It 
 
 ## Extension points
 
-- New provider: implement `VisionBackend`; keep semantics in the shared prompt.
+- New provider: implement `VisionBackend`; override `prepare_output_schema()` only when the provider transport requires a documented schema subset, and keep semantics in the shared prompt.
 - New model coordinate convention: add a narrow adapter in `coordinates.py` plus full box-field tests.
 - New analysis field: change Pydantic first, then prompt version/schema version, coordinate conversion if relevant, frontend types/UI, tests, and changelog.
 

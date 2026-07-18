@@ -23,7 +23,7 @@ docker compose up --build
 
 Open <http://127.0.0.1:8000>. The Compose configuration maps `host.docker.internal` on Linux and macOS-compatible Docker environments so the container can reach the host Ollama service.
 
-For Gemini, set `GEMINI_API_KEY` only in the untracked `.env`. Selected frames leave the machine when Gemini is active.
+For Gemini, either set `GEMINI_API_KEY` in the untracked `.env` or use the page's Gemini Key dialog. A dialog value is validated and kept only in backend process memory; it is not browser-persisted and disappears on restart. Because the MVP has no authentication, configure credentials only over the default loopback binding or trusted HTTPS. Selected frames leave the machine when Gemini is active.
 
 ## Native development
 
@@ -114,10 +114,11 @@ Ollama smoke criteria:
 - Overlay coordinates visually correspond to the exact submitted frame.
 - Token input/output counts are present when Ollama reports them.
 
-Gemini smoke criteria add explicit confirmation that sending the chosen frame to Google is acceptable. Never use a household camera for a release smoke test unless the owner has expressly authorized it.
+Gemini smoke criteria add explicit confirmation that sending the chosen frame to Google is acceptable. Test the exact selected model, inspect the actual serialized generation parameters, confirm that the portable baseline does not send an unsupported `thinking_level`, and verify the history schema profile is `google-ai-structured-output-compact-v1`. The returned JSON must pass `FrameAnalysis`, not merely complete the provider request. Any model-specific generation option or schema keyword must satisfy [Gemini/Gemma provider rules](GEMINI_PROVIDER.md). Never use a household camera for a release smoke test unless the owner has expressly authorized it.
 
 ## Debugging guidance
 
+- Follow the [provider compatibility engineering method](PROVIDER_COMPATIBILITY.md) and identify the failing layer before changing prompts or request parameters.
 - Inspect `/api/monitor/status` for queue pressure, dropped frames, latency, and redacted errors.
 - Inspect the selected history record before changing prompts: raw response, schema, prompt version, coordinate metadata, and attempts identify whether the failure is generation, parsing, conversion, or rendering.
 - Compare the annotated history image, not the live preview.

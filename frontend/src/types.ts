@@ -12,6 +12,8 @@ export interface ProviderInfo {
   version?: string;
   cloud: boolean;
   models_dynamic: boolean;
+  key_configured?: boolean;
+  key_source?: "none" | "environment" | "web";
 }
 
 export interface RelatedObject {
