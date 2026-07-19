@@ -41,11 +41,21 @@ export interface CatObservation {
   evidence: string[];
 }
 
+export type AdultPresence = "present" | "not_detected" | "unknown";
+
+export interface AdultObservation {
+  adult_box: Box;
+  confidence: number;
+  evidence: string[];
+}
+
 export interface FrameAnalysis {
-  schema_version: "1.1";
+  schema_version: "1.2";
   summary: string;
   image_quality: string;
   infants: InfantObservation[];
+  adult_presence: AdultPresence;
+  adults: AdultObservation[];
   cats: CatObservation[];
   overall_risk: Risk;
   risk_reasons: string[];
@@ -71,11 +81,25 @@ export interface HistorySummary {
   image_url: string;
 }
 
+export interface AnalysisAttempt {
+  attempt: number;
+  outcome: "success" | "validation_error" | "provider_error" | "cancelled";
+  error_type: string | null;
+  error: string | null;
+  response_index: number | null;
+  usage: Record<string, unknown>;
+  warnings: string[];
+  will_retry: boolean;
+  retry_reason: string | null;
+}
+
 export interface HistoryDetail extends HistorySummary {
   source: string;
   analysis: FrameAnalysis | null;
   raw_responses: string[];
   errors: string[];
+  warnings: string[];
+  attempt_details: AnalysisAttempt[];
   prompt_version: string;
   prompt: string;
   output_schema: Record<string, unknown>;

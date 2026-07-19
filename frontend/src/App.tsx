@@ -73,6 +73,7 @@ const overlayColors: Record<string, string> = {
   hand: "#45d4d4",
   other_occluder: "#ff5e6c",
   cat: "#d58cff",
+  adult: "#ff6bd6",
 };
 
 const emptyStatus: MonitorStatus = {
@@ -138,11 +139,19 @@ interface OverlayBox {
   color: string;
 }
 
+function subjectLabel(name: string, index: number, total: number) {
+  return total > 1 ? `${name} ${index + 1}` : name;
+}
+
 function analysisBoxes(analysis: FrameAnalysis | null | undefined): OverlayBox[] {
   if (!analysis) return [];
   const result: OverlayBox[] = [];
   analysis.infants.forEach((infant, index) => {
-    result.push({ box: infant.infant_box, label: `婴儿 ${index + 1}`, color: overlayColors.infant });
+    result.push({
+      box: infant.infant_box,
+      label: subjectLabel("婴儿", index, analysis.infants.length),
+      color: overlayColors.infant,
+    });
     if (infant.face_box) result.push({ box: infant.face_box, label: "脸部", color: overlayColors.face });
     infant.related_objects.forEach((object) => {
       result.push({
@@ -154,6 +163,13 @@ function analysisBoxes(analysis: FrameAnalysis | null | undefined): OverlayBox[]
   });
   (analysis.cats ?? []).forEach((cat, index) => {
     result.push({ box: cat.cat_box, label: `猫 ${index + 1}`, color: overlayColors.cat });
+  });
+  analysis.adults.forEach((adult, index) => {
+    result.push({
+      box: adult.adult_box,
+      label: subjectLabel("成人", index, analysis.adults.length),
+      color: overlayColors.adult,
+    });
   });
   return result;
 }
@@ -218,9 +234,81 @@ function JsonCode({ value }: { value: unknown }) {
   return <pre className="json-code"><code className="hljs language-json" dangerouslySetInnerHTML={{ __html: highlighted }} /></pre>;
 }
 
+const attemptOutcomeLabels = {
+  success: "成功",
+  validation_error: "结构化结果校验失败",
+  provider_error: "模型后端调用失败",
+  cancelled: "会话停止，调用已取消",
+} as const;
+
+function retryReasonText(reason: string | null): string | null {
+  if (!reason) return null;
+  if (reason.startsWith("local_validation:")) {
+    return `本地结构化校验失败（${reason.slice("local_validation:".length)}），因此发起下一次调用`;
+  }
+  if (reason === "retryable_provider_error") {
+    return "模型后端错误被判定为可重试，因此发起下一次调用";
+  }
+  return reason;
+}
+
+function AttemptAudit({ detail }: { detail: HistoryDetail }) {
+  if (detail.attempt_details.length === 0) {
+    return (
+      <div className="attempt-audit legacy-attempt-audit">
+        <p>此记录没有逐次调用元数据，只能显示旧版错误列表。</p>
+        <JsonCode value={{ errors: detail.errors }} />
+      </div>
+    );
+  }
+  return (
+    <div className="attempt-audit">
+      {detail.attempt_details.map((attempt) => {
+        const retryReason = retryReasonText(attempt.retry_reason);
+        return (
+          <section className="attempt-card" key={attempt.attempt}>
+            <div className="attempt-header">
+              <strong>调用 {attempt.attempt}</strong>
+              <span className={`attempt-status attempt-${attempt.outcome}`}>
+                {attemptOutcomeLabels[attempt.outcome]}{attempt.will_retry ? " · 已触发重试" : ""}
+              </span>
+            </div>
+            <div className="attempt-metrics">
+              <span>输入 {formatTokens(attempt.usage.input_tokens as number | null | undefined)}</span>
+              <span>输出 {formatTokens(attempt.usage.output_tokens as number | null | undefined)}</span>
+              <span>{attempt.response_index === null ? "未产生模型响应" : `对应模型响应 ${attempt.response_index + 1}`}</span>
+            </div>
+            {retryReason && <p className="attempt-retry-reason">{retryReason}</p>}
+            {attempt.warnings.map((warning) => (
+              <p className="attempt-warning" key={warning}>{warning}</p>
+            ))}
+            {attempt.error && (
+              <div className="attempt-error">
+                <div>{attempt.error_type ?? "Error"}</div>
+                <pre>{attempt.error}</pre>
+              </div>
+            )}
+            {Object.keys(attempt.usage).length > 0 && (
+              <details className="attempt-usage">
+                <summary>本次调用用量明细</summary>
+                <JsonCode value={attempt.usage} />
+              </details>
+            )}
+          </section>
+        );
+      })}
+    </div>
+  );
+}
+
 function AnalysisPanel({ analysis }: { analysis: FrameAnalysis | null | undefined }) {
   if (!analysis) return <div className="empty-analysis">暂无结构化结果</div>;
   const cats = analysis.cats ?? [];
+  const adultStatus = analysis.adult_presence === "present"
+    ? `检测到 ${analysis.adults.length} 位成人`
+    : analysis.adult_presence === "not_detected"
+      ? (analysis.infants.length > 0 ? "未检测到成人，仅检测到婴儿" : "未检测到成人或婴儿")
+      : "无法可靠判断成人是否在场";
   return (
     <div className="analysis-panel">
       <div className="analysis-heading">
@@ -228,6 +316,10 @@ function AnalysisPanel({ analysis }: { analysis: FrameAnalysis | null | undefine
         <span>{labels[analysis.image_quality] ?? analysis.image_quality}</span>
       </div>
       <p className="summary">{analysis.summary}</p>
+      <div className={`adult-presence adult-${analysis.adult_presence}`}>
+        <strong>成人监测</strong>
+        <span>{adultStatus}</span>
+      </div>
       <div className={`cat-presence ${cats.length > 0 ? "cat-detected" : "cat-absent"}`}>
         <strong>猫监测</strong>
         <span>{cats.length > 0 ? `检测到 ${cats.length} 只猫进入摄像头范围` : "未检测到猫进入摄像头范围"}</span>
@@ -240,7 +332,7 @@ function AnalysisPanel({ analysis }: { analysis: FrameAnalysis | null | undefine
       {analysis.infants.map((infant, index) => (
         <section className="infant-card" key={index}>
           <div className="infant-title">
-            <strong>婴儿 {index + 1}</strong>
+            <strong>{subjectLabel("婴儿", index, analysis.infants.length)}</strong>
             <RiskBadge risk={infant.risk_level} />
           </div>
           <dl>
@@ -255,6 +347,17 @@ function AnalysisPanel({ analysis }: { analysis: FrameAnalysis | null | undefine
         </section>
       ))}
       {analysis.infants.length === 0 && <div className="no-infant">当前画面未定位到婴儿</div>}
+      {analysis.adults.map((adult, index) => (
+        <section className="infant-card adult-card" key={`adult-${index}`}>
+          <div className="infant-title">
+            <strong>{subjectLabel("成人", index, analysis.adults.length)}</strong>
+            <span className="adult-confidence">置信度 {Math.round(adult.confidence * 100)}%</span>
+          </div>
+          {adult.evidence.length > 0 && (
+            <ul className="evidence">{adult.evidence.map((item) => <li key={item}>{item}</li>)}</ul>
+          )}
+        </section>
+      ))}
       {cats.map((cat, index) => (
         <section className="infant-card cat-card" key={`cat-${index}`}>
           <div className="infant-title">
@@ -692,9 +795,19 @@ export default function App() {
               <div className="history-info">
                 <strong>{formatTime(item.captured_at)}</strong>
                 <span>{item.provider} · {item.model}</span>
-                <span>{item.analysis ? ((item.analysis.cats ?? []).length > 0 ? `检测到猫 ${(item.analysis.cats ?? []).length} 只` : "未检测到猫") : "猫监测 —"}</span>
-                <span>{item.status === "error" ? "分析失败" : item.latency_ms ? `${(item.latency_ms / 1000).toFixed(1)}s · ${item.attempts} 次调用` : "分析中"}</span>
-                <span>Token 输入 {formatTokens(item.input_tokens)} · 输出 {formatTokens(item.output_tokens)}</span>
+                <span>{item.analysis
+                  ? `婴儿 ${item.analysis.infants.length} · 成人 ${item.analysis.adult_presence === "unknown" ? "未知" : item.analysis.adults.length} · 猫 ${(item.analysis.cats ?? []).length}`
+                  : "婴儿 — · 成人 — · 猫 —"}</span>
+                <span>
+                  {item.status === "error"
+                    ? "分析失败"
+                    : item.attempts > 1 && item.latency_ms
+                      ? `重试后成功 · 耗时 ${(item.latency_ms / 1000).toFixed(1)}s`
+                    : item.latency_ms
+                      ? `耗时 ${(item.latency_ms / 1000).toFixed(1)}s`
+                      : "分析中"}
+                  {` · 调用 ${item.attempts} 次 · 输入 ${formatTokens(item.input_tokens)} · 输出 ${formatTokens(item.output_tokens)}`}
+                </span>
               </div>
             </button>
           ))}
@@ -713,10 +826,14 @@ export default function App() {
         <section className="debug-section">
           <div className="history-heading"><div><span className="section-number">04</span><h2>请求审计</h2></div><span>{detail.prompt_version}</span></div>
           <div className="debug-grid">
-            <details open><summary>原始模型响应</summary>{detail.raw_responses.length > 0 ? detail.raw_responses.map((response, index) => <div className="response-attempt" key={index}>{detail.raw_responses.length > 1 && <div className="attempt-label">尝试 {index + 1}</div>}<JsonCode value={response} /></div>) : <pre>No response</pre>}</details>
+            <details open><summary>逐次调用审计</summary><AttemptAudit detail={detail} /></details>
+            <details><summary>原始模型响应</summary>{detail.raw_responses.length > 0 ? detail.raw_responses.map((response, index) => {
+              const attempt = detail.attempt_details.find((item) => item.response_index === index);
+              return <div className="response-attempt" key={index}><div className="attempt-label">调用 {attempt?.attempt ?? index + 1} · 模型响应 {index + 1}</div><JsonCode value={response} /></div>;
+            }) : <pre>No response</pre>}</details>
             <details><summary>实际发送的 Prompt</summary><pre>{detail.prompt}</pre></details>
             <details><summary>JSON Schema</summary><JsonCode value={detail.output_schema} /></details>
-            <details><summary>调用参数与错误</summary><JsonCode value={{ generation: detail.generation_params, errors: detail.errors }} /></details>
+            <details><summary>调用参数与汇总用量</summary><JsonCode value={{ generation: detail.generation_params }} /></details>
           </div>
         </section>
       )}

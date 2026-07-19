@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import Enum
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, RootModel, SecretStr, field_validator, model_validator
 
@@ -87,6 +87,12 @@ class CatProximity(str, Enum):
     UNKNOWN = "unknown"
 
 
+class AdultPresence(str, Enum):
+    PRESENT = "present"
+    NOT_DETECTED = "not_detected"
+    UNKNOWN = "unknown"
+
+
 class RelatedObject(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -118,13 +124,23 @@ class CatObservation(BaseModel):
     evidence: list[str] = Field(max_length=2)
 
 
+class AdultObservation(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    adult_box: BoundingBox
+    confidence: float = Field(ge=0, le=1)
+    evidence: list[str] = Field(max_length=2)
+
+
 class FrameAnalysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["1.1"]
+    schema_version: Literal["1.2"]
     summary: str = Field(max_length=500)
     image_quality: ImageQuality
-    infants: list[InfantObservation] = Field(max_length=8)
+    infants: list[InfantObservation] = Field(max_length=64)
+    adult_presence: AdultPresence
+    adults: list[AdultObservation] = Field(max_length=64)
     cats: list[CatObservation] = Field(max_length=4)
     overall_risk: RiskLevel
     risk_reasons: list[str] = Field(max_length=5)
@@ -133,6 +149,10 @@ class FrameAnalysis(BaseModel):
     def validate_empty_scene(self) -> "FrameAnalysis":
         if not self.infants and self.overall_risk is not RiskLevel.UNKNOWN:
             raise ValueError("overall_risk must be unknown when no infant is detected")
+        if self.adults and self.adult_presence is not AdultPresence.PRESENT:
+            raise ValueError("adult_presence must be present when adults are detected")
+        if not self.adults and self.adult_presence is AdultPresence.PRESENT:
+            raise ValueError("adult_presence cannot be present without an adult observation")
         return self
 
 
@@ -165,6 +185,20 @@ class MonitorStartRequest(BaseModel):
         return value
 
 
+class AnalysisAttempt(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    attempt: int = Field(ge=1)
+    outcome: Literal["success", "validation_error", "provider_error", "cancelled"]
+    error_type: str | None = None
+    error: str | None = None
+    response_index: int | None = Field(default=None, ge=0)
+    usage: dict[str, Any] = Field(default_factory=dict)
+    warnings: list[str] = Field(default_factory=list)
+    will_retry: bool = False
+    retry_reason: str | None = None
+
+
 class HistoryItem(BaseModel):
     id: str
     session_id: str
@@ -177,6 +211,8 @@ class HistoryItem(BaseModel):
     analysis: FrameAnalysis | None
     raw_responses: list[str]
     errors: list[str]
+    warnings: list[str]
+    attempt_details: list[AnalysisAttempt]
     latency_ms: float | None
     attempts: int
     input_tokens: int | None

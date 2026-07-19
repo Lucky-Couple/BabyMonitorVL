@@ -196,7 +196,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
 
     @app.get("/api/prompt")
     async def prompt_contract() -> dict[str, Any]:
-        schema = output_schema()
+        schema = output_schema(
+            max_infants=settings.max_infants,
+            max_adults=settings.max_adults,
+        )
         return {"version": PROMPT_VERSION, "prompt": build_prompt(schema), "output_schema": schema}
 
     @app.websocket("/api/events")

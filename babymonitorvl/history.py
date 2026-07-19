@@ -7,7 +7,7 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .schemas import FrameAnalysis, HistoryItem, HistorySummary, ProviderName
+from .schemas import AnalysisAttempt, FrameAnalysis, HistoryItem, HistorySummary, ProviderName
 
 
 def utc_now() -> datetime:
@@ -34,6 +34,8 @@ class HistoryRecord:
     analysis: FrameAnalysis | None = None
     raw_responses: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
+    warnings: list[str] = field(default_factory=list)
+    attempt_details: list[AnalysisAttempt] = field(default_factory=list)
     latency_ms: float | None = None
     attempts: int = 0
     usage: dict[str, Any] = field(default_factory=dict)
@@ -47,6 +49,8 @@ class HistoryRecord:
             "analysis": self.analysis.model_dump(mode="json") if self.analysis else None,
             "raw_responses": self.raw_responses,
             "errors": self.errors,
+            "warnings": self.warnings,
+            "attempt_details": [item.model_dump(mode="json") for item in self.attempt_details],
             "usage": self.usage,
         }
         return len(self.image_bytes) + len(json.dumps(metadata, ensure_ascii=False).encode("utf-8"))
@@ -70,6 +74,8 @@ class HistoryRecord:
             analysis=self.analysis,
             raw_responses=self.raw_responses,
             errors=self.errors,
+            warnings=self.warnings,
+            attempt_details=self.attempt_details,
             latency_ms=self.latency_ms,
             attempts=self.attempts,
             input_tokens=self.token_usage("input_tokens"),
@@ -129,6 +135,8 @@ class HistoryStore:
         analysis: FrameAnalysis | None,
         raw_responses: list[str],
         errors: list[str],
+        warnings: list[str],
+        attempt_details: list[AnalysisAttempt],
         latency_ms: float | None,
         attempts: int,
         usage: dict[str, Any] | None = None,
@@ -142,6 +150,8 @@ class HistoryStore:
             record.analysis = analysis
             record.raw_responses = list(raw_responses)
             record.errors = list(errors)
+            record.warnings = list(warnings)
+            record.attempt_details = list(attempt_details)
             record.latency_ms = latency_ms
             record.attempts = attempts
             record.usage = usage or {}

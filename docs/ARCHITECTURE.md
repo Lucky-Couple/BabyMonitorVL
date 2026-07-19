@@ -69,7 +69,7 @@ History intentionally:
 
 The main annotated image always references a completed/pending history record and therefore matches its boxes. The live preview uses `/api/live/image` and intentionally has no overlay. Never overlay the latest result on the latest capture: model latency makes them different frames.
 
-The frontend receives state through initial HTTP fetches plus `/api/events`. It can reconnect and refresh history. Debug details expose raw responses, the exact prompt, the provider transport schema, its schema profile, generation settings, coordinate orders, errors, latency, attempts, and tokens. For Gemini, the prompt contains the complete Pydantic schema while request history contains the Google-compatible transport representation; application validation still uses `FrameAnalysis`.
+The frontend receives state through initial HTTP fetches plus `/api/events`. It can reconnect and refresh history. Debug details expose raw responses, the exact prompt, the provider transport schema, its schema profile, generation settings, coordinate orders, errors, latency, attempts, and tokens. Each model call also has an explicit audit entry linking its call number to outcome, error, response index, usage, and retry reason; never align response/error/usage arrays by position. For Gemini, the prompt contains the complete Pydantic schema while request history contains the Google-compatible transport representation; application validation still uses `FrameAnalysis`.
 
 Gemini credentials may originate from the backend environment or from the settings dialog. A web-submitted key is validated before use, retained only by the active backend object in process memory, and never returned to the browser. Provider replacement is serialized with session start: credentials cannot change while a monitor session is active. Resetting restores the startup environment value, and process restart always discards the web override.
 
@@ -80,6 +80,7 @@ Gemini credentials may originate from the backend environment or from the settin
 - Provider/network/schema failure: at most two attempts; the failed submitted frame remains in history.
 - Gemini timeout/stop: the native async SDK request is canceled with the analysis task; the SDK request also receives the configured per-call timeout.
 - Invalid box: no clamping or repair; validation fails visibly.
+- Exact same-category duplicate box: canonical post-processing keeps the first, drops later duplicates, logs/stores warnings, and preserves raw output; no approximate suppression is allowed.
 - Process restart: history and session state are lost by design.
 - Browser disconnect: backend monitoring continues; WebSocket reconnect restores status/history.
 

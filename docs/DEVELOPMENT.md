@@ -23,6 +23,8 @@ docker compose up --build
 
 Open <http://127.0.0.1:8000>. The Compose configuration maps `host.docker.internal` on Linux and macOS-compatible Docker environments so the container can reach the host Ollama service.
 
+Subject limits default to `MAX_INFANTS=1` and `MAX_ADULTS=4`. Both values accept integers from 1 through 64. They are injected into the shared prompt and Ollama JSON Schema; Gemini's compact transport profile omits `maxItems`, so the prompt plus local post-response validation enforce the same configured limits.
+
 For Gemini, either set `GEMINI_API_KEY` in the untracked `.env` or use the page's Gemini Key dialog. A dialog value is validated and kept only in backend process memory; it is not browser-persisted and disappears on restart. Because the MVP has no authentication, configure credentials only over the default loopback binding or trusted HTTPS. Selected frames leave the machine when Gemini is active.
 
 ## Native development

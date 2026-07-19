@@ -12,6 +12,8 @@ services:
       DEFAULT_GEMINI_MODEL: ${DEFAULT_GEMINI_MODEL:-gemini-3.5-flash}
       MODEL_TIMEOUT_SECONDS: ${MODEL_TIMEOUT_SECONDS:-60}
       HISTORY_MAX_BYTES: ${HISTORY_MAX_BYTES:-1073741824}
+      MAX_INFANTS: ${MAX_INFANTS:-1}
+      MAX_ADULTS: ${MAX_ADULTS:-4}
     extra_hosts:
       - "host.docker.internal:host-gateway"
     restart: unless-stopped

@@ -105,10 +105,14 @@ h2 { font-size: 14px; margin: 0; letter-spacing: .02em; }
 .risk-alert { color: var(--red); background: rgba(255,94,108,.08); }
 .risk-unknown { color: #93a0ac; background: rgba(147,160,172,.08); }
 .summary { font-size: 13px; line-height: 1.65; color: #cbd4db; }
-.cat-presence { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 10px 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 3px; font-size: 11px; }
+.adult-presence, .cat-presence { display: flex; align-items: center; justify-content: space-between; gap: 12px; margin: 10px 0; padding: 9px 10px; border: 1px solid var(--line); border-radius: 3px; font-size: 11px; }
+.adult-presence strong { color: #ff6bd6; }
+.adult-presence span, .cat-presence span { color: var(--muted); text-align: right; }
+.adult-presence.adult-present { border-color: #7f3a69; background: rgba(255,107,214,.08); }
+.adult-presence.adult-unknown { border-color: #4b535c; background: rgba(147,160,172,.06); }
 .cat-presence strong { color: #d58cff; }
-.cat-presence span { color: var(--muted); text-align: right; }
 .cat-presence.cat-detected { border-color: #67467b; background: rgba(213,140,255,.08); }
+.adult-confidence { color: #ff6bd6; font-size: 10px; }
 .cat-confidence { color: #d58cff; font-size: 10px; }
 .risk-reasons, .evidence { padding-left: 18px; color: #abb6bf; font-size: 12px; line-height: 1.6; }
 .infant-card { border-top: 1px solid var(--line); padding-top: 13px; margin-top: 13px; }
@@ -152,6 +156,23 @@ pre { margin: 0; max-height: 360px; overflow: auto; white-space: pre-wrap; word-
 .hljs-punctuation { color: #8b949e; }
 .response-attempt + .response-attempt { border-top: 1px solid var(--line); }
 .attempt-label { padding: 7px 13px; color: var(--yellow); background: #111820; font: 10px/1.4 "SFMono-Regular", Consolas, monospace; }
+.attempt-audit { padding: 10px; display: flex; flex-direction: column; gap: 9px; background: #080c10; }
+.attempt-card { border: 1px solid #293440; border-radius: 3px; overflow: hidden; background: #0c1218; }
+.attempt-header { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 9px 11px; border-bottom: 1px solid var(--line); }
+.attempt-header strong { font: 12px/1.4 "SFMono-Regular", Consolas, monospace; }
+.attempt-status { font-size: 10px; }
+.attempt-success { color: var(--cyan); }
+.attempt-validation_error, .attempt-provider_error { color: var(--red); }
+.attempt-cancelled { color: var(--muted); }
+.attempt-metrics { display: flex; flex-wrap: wrap; gap: 6px 14px; padding: 8px 11px; color: var(--muted); font-size: 10px; }
+.attempt-retry-reason { margin: 0 11px 9px; padding: 8px 10px; border-left: 2px solid var(--yellow); color: #d9c17c; background: rgba(242,184,75,.06); font-size: 11px; line-height: 1.5; }
+.attempt-warning { margin: 0 11px 9px; padding: 8px 10px; border-left: 2px solid #e59a45; color: #ddb27f; background: rgba(229,154,69,.07); font: 10px/1.5 "SFMono-Regular", Consolas, monospace; }
+.attempt-error { margin: 0 11px 10px; border: 1px solid rgba(255,94,108,.35); }
+.attempt-error > div { padding: 7px 9px; color: var(--red); background: rgba(255,94,108,.08); font: 10px/1.4 "SFMono-Regular", Consolas, monospace; }
+.attempt-error pre { max-height: 220px; padding: 9px; color: #d7a8ad; }
+.attempt-usage { border-top: 1px solid var(--line); background: #090e13; }
+.attempt-usage summary { padding: 8px 11px; color: var(--muted); font-size: 10px; }
+.legacy-attempt-audit p { margin: 0; padding: 8px; color: var(--muted); font-size: 11px; }
 footer { text-align: center; color: #53606b; font-size: 11px; padding: 28px; }
 
 @media (max-width: 1050px) {

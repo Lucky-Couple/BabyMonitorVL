@@ -4,7 +4,7 @@
 
 `FrameAnalysis` in `babymonitorvl/schemas.py` is the single source of truth. Pydantic generates the JSON Schema sent to every provider. Frontend types mirror the validated API response; they are not an independent definition.
 
-Current analysis schema version: `1.1`.
+Current analysis schema version: `1.2`.
 
 Top-level required fields:
 
@@ -12,13 +12,21 @@ Top-level required fields:
 - `summary`
 - `image_quality`
 - `infants`
+- `adult_presence`
+- `adults`
 - `cats`
 - `overall_risk`
 - `risk_reasons`
 
-An empty infant list requires `overall_risk=unknown`, even when a cat is visible. A cat can therefore be reported without inventing an infant or a baby-specific risk.
+An empty infant list requires `overall_risk=unknown`, even when an adult or cat is visible. Adult and cat observations can therefore be reported without inventing an infant or a baby-specific risk.
 
-Every model is allowed to say `unknown`. The contract prefers uncertainty to hallucinated bodies, faces, cats, blankets, or risks.
+`adult_presence` is a conservative operational signal:
+
+- `present` requires at least one matching grounded observation in `adults`.
+- `not_detected` requires a sufficiently usable view and an empty `adults` list.
+- `unknown` is required when image quality, occlusion, framing, or an age-ambiguous person prevents a reliable judgment; `adults` remains empty.
+
+Every model is allowed to say `unknown`. The contract prefers uncertainty to hallucinated bodies, faces, adults, cats, blankets, or risks. Adult presence does not change infant risk in this version and does not yet pause analysis.
 
 ## Box contract
 
@@ -38,23 +46,30 @@ Model-native exception currently implemented:
 | Gemini | canonical YXYX | canonical YXYX |
 | Other Ollama families | canonical YXYX | canonical YXYX |
 
-Conversion must include `infant_box`, nullable `face_box`, every `related_objects[].box`, and every `cats[].cat_box`. Add future box fields to conversion and tests in the same change. Raw responses are never rewritten in history.
+Conversion must include `infant_box`, nullable `face_box`, every `related_objects[].box`, every `adults[].adult_box`, and every `cats[].cat_box`. Add future box fields to conversion and tests in the same change. Raw responses are never rewritten in history.
 
 Out-of-range, reversed, missing, non-integer, or enum-invalid data is a validation failure. Do not clamp or reorder it silently.
 
+The runtime subject limits default to one infant and four adults and are configurable through `MAX_INFANTS` and `MAX_ADULTS`. The configured values appear in the full shared prompt and schema. Ollama receives those `maxItems` constraints directly. Gemini's smoke-validated compact transport schema omits `maxItems`, so local validation enforces the same limits after generation.
+
+After canonical coordinate conversion, exact coordinate duplicates within the same semantic category are the only allowed post-processing exception. The first observation/box is retained and later identical boxes are removed. Infant, adult, and cat duplicates remove the later full observation; duplicate related objects use their object kind as the category. Every removal emits a server warning and a per-attempt history warning while preserving the byte-for-byte raw response. There is no IoU, approximate overlap, cross-category, tracking, or visual deduplication.
+
 ## Shared prompt baseline
 
-Current prompt version: `baby-monitor-single-frame-v4-cat-detection`.
+Current prompt version: `baby-monitor-single-frame-v7-risk-consistency`.
 
 The shared English prompt:
 
 - treats the input as one still frame;
 - prohibits temporal, medical, breathing, emotion, and hidden-region inference;
-- requires visible anatomical evidence for infants and cats;
+- requires visible anatomical evidence for infants, adults, and cats;
+- treats adult presence as higher-priority than cat detection and rejects isolated limbs, reflections, photos, screens, dolls, prints, and age-ambiguous people as adult evidence;
 - excludes dolls, plush toys, prints, bedding folds, patterns, shadows, and ambiguous shapes;
-- defines posture, face visibility, blanket coverage, related objects, cat proximity, and risk semantics;
+- defines posture, face visibility, blanket coverage, related objects, adult-presence consistency, cat proximity, and risk semantics;
 - embeds the exact generated JSON Schema;
 - requires JSON only.
+
+The empty-scene risk invariant is repeated as a mandatory pre-output consistency check and in the `overall_risk` schema description. Some small VLMs still map a visibly safe empty room to `normal`. Because the contract uniquely determines the correction, the monitor converts `overall_risk` from `normal | watch | alert` to `unknown` only when the decoded `infants` value is exactly an empty array. This consumes no second model call, preserves the raw response, and records `contract_value_repaired` in both server logs and the per-attempt history warning. No uncertain visual field, subject, box, posture, visibility, coverage, or provider parse failure is repaired this way.
 
 Providers transport this prompt unchanged. Model-family coordinate wording and the generated box description may differ only through `BoxCoordinateOrder`; semantic tasks must not differ by provider.
 
@@ -98,7 +113,7 @@ Gemini adapter:
 - lists compatible Gemini models plus hosted Gemma 4 image-input models supported by the Interactions API, while excluding older/text-only Gemma and embedding/image-generation/video/live/audio variants;
 - counts thinking tokens as output tokens.
 
-The monitor retries once for transient/unclassified provider failures and local validation failures. It does not replay a deterministic provider HTTP 4xx with an unchanged request. Raw responses, per-attempt usage, and errors remain available in history. A local JSON-envelope, non-object, or Pydantic validation failure receives a concise correction suffix on the second request; provider exceptions such as a missing SDK response field do not. Correction codes never copy raw model output into the next prompt, and the shared baseline itself remains preserved in history.
+The monitor retries once for transient/unclassified provider failures and local validation failures. It does not replay a deterministic provider HTTP 4xx with an unchanged request. Every call stores an explicit attempt number, outcome, sanitized error type/message, response index, provider usage, retry decision, and retry reason. This mapping remains correct when a provider fails before producing either a response or usage data; UI code must not infer correspondence from parallel array indexes. A local JSON-envelope, non-object, or Pydantic validation failure receives a concise correction suffix on the second request; provider exceptions such as a missing SDK response field do not. Correction codes never copy raw model output into the next prompt, and the shared baseline itself remains preserved in history.
 
 Model JSON parsing preserves every raw response unchanged in history. The validator accepts exactly one JSON value, optionally wrapped by a complete single empty/`json` Markdown code fence or followed only by an isolated closing fence. An opening fence without its closing fence is invalid. This narrow compatibility handles hosted models that append ` ``` ` despite structured-output mode. A second JSON value, prose, another fence block, or any other trailing content remains a visible parse failure; the parser never searches greedily for a convenient object.
 
@@ -116,8 +131,9 @@ Overlay colors are stable category identifiers:
 | Hand | `#45d4d4` |
 | Other occluder | `#ff5e6c` |
 | Cat | `#d58cff` |
+| Adult | `#ff6bd6` |
 
-Color is determined by category, never risk relation. Main/history box widths are `2` and `1.5`; label backgrounds use category color with opacity `0.45`. The UI renders all validated model observations as returned. It does not deduplicate or reposition repeated model boxes.
+Color is determined by category, never risk relation. Main/history box widths are `2` and `1.5`; label backgrounds use category color with opacity `0.45`. Adult state and details appear before cat state/details, and adult overlays render after cat overlays so the higher-priority adult label remains visible when they overlap. The UI renders the canonical backend result after exact same-category duplicate removal. It does not perform its own deduplication or reposition boxes.
 
 ## Contract-change checklist
 

@@ -16,13 +16,33 @@ async def test_prompt_and_stopped_status_are_available_without_models(tmp_path) 
         prompt = await client.get("/api/prompt")
         status = await client.get("/api/monitor/status")
     assert prompt.status_code == 200
-    assert prompt.json()["version"] == "baby-monitor-single-frame-v4-cat-detection"
+    assert prompt.json()["version"] == "baby-monitor-single-frame-v7-risk-consistency"
     assert "JSON_SCHEMA" in prompt.json()["prompt"]
+    assert prompt.json()["output_schema"]["properties"]["infants"]["maxItems"] == 1
+    assert prompt.json()["output_schema"]["properties"]["adults"]["maxItems"] == 4
     assert status.status_code == 200
     assert status.json()["state"] == "stopped"
     assert status.json()["reconnect_attempt"] == 0
     assert status.json()["reconnect_delay_seconds"] is None
     assert status.json()["history"]["items"] == 0
+
+
+@pytest.mark.asyncio
+async def test_prompt_uses_configured_subject_limits(tmp_path) -> None:
+    app = create_app(
+        Settings(
+            frontend_dist=tmp_path,
+            gemini_api_key=None,
+            max_infants=2,
+            max_adults=6,
+        )
+    )
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/prompt")
+    schema = response.json()["output_schema"]
+    assert schema["properties"]["infants"]["maxItems"] == 2
+    assert schema["properties"]["adults"]["maxItems"] == 6
 
 
 @pytest.mark.asyncio

@@ -4,6 +4,23 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Added
+
+- Added conservative adult-presence analysis with `present | not_detected | unknown` state, per-adult grounding boxes, confidence, and visible evidence.
+- Added stable pink adult overlays and adult-first status/details in current results and debug history.
+- Added per-call audit records that explicitly connect call number, outcome, sanitized error, model response, usage, and retry reason, including failures that produce no response.
+- Added configurable `MAX_INFANTS`/`MAX_ADULTS` limits, defaulting to one infant and four adults, with prompt/schema injection and local enforcement.
+- Added exact same-category duplicate-box removal that preserves the first box and raw response while emitting server and per-call audit warnings.
+
+### Changed
+
+- Bumped the analysis schema to `1.2`; adult detection now precedes cat detection and rejects partial/indirect or age-ambiguous evidence.
+- Extended Qwen-family XYXY-to-canonical conversion and validation coverage to every adult box.
+- Changed history cards to identify retry-success records and replaced the ambiguous combined error JSON with a numbered call-by-call audit view.
+- Removed numeric suffixes from single infant/adult overlay labels and detail headings while retaining numbering for multiple subjects.
+- Updated the shared prompt to `baby-monitor-single-frame-v7-risk-consistency` with configured subject maxima, duplicate-box instructions, and a mandatory empty-infant risk consistency check reflected in the generated schema description.
+- Avoided a second inference for the deterministic `infants=[]` plus non-`unknown` risk conflict by applying an explicit audited repair while preserving the raw provider response.
+
 ## [0.2.0] - 2026-07-19
 
 ### Changed

@@ -22,6 +22,10 @@ class ModelOutputError(ValueError):
     """The decoded model payload cannot be interpreted as an analysis object."""
 
 
+class SubjectLimitError(ValueError):
+    """The model returned more distinct subjects than runtime configuration permits."""
+
+
 def model_box_order(provider: ProviderName, model: str) -> BoxCoordinateOrder:
     """Return the native grounding convention for a provider/model pair.
 
@@ -66,19 +70,23 @@ def normalize_analysis_payload(payload: dict[str, Any], order: BoxCoordinateOrde
         return box
 
     infants = result.get("infants")
-    if not isinstance(infants, list):
-        return result
-    for infant in infants:
-        if not isinstance(infant, dict):
-            continue
-        infant["infant_box"] = normalize_box(infant.get("infant_box"))
-        if infant.get("face_box") is not None:
-            infant["face_box"] = normalize_box(infant.get("face_box"))
-        related_objects = infant.get("related_objects")
-        if isinstance(related_objects, list):
-            for related_object in related_objects:
-                if isinstance(related_object, dict):
-                    related_object["box"] = normalize_box(related_object.get("box"))
+    if isinstance(infants, list):
+        for infant in infants:
+            if not isinstance(infant, dict):
+                continue
+            infant["infant_box"] = normalize_box(infant.get("infant_box"))
+            if infant.get("face_box") is not None:
+                infant["face_box"] = normalize_box(infant.get("face_box"))
+            related_objects = infant.get("related_objects")
+            if isinstance(related_objects, list):
+                for related_object in related_objects:
+                    if isinstance(related_object, dict):
+                        related_object["box"] = normalize_box(related_object.get("box"))
+    adults = result.get("adults")
+    if isinstance(adults, list):
+        for adult in adults:
+            if isinstance(adult, dict):
+                adult["adult_box"] = normalize_box(adult.get("adult_box"))
     cats = result.get("cats")
     if isinstance(cats, list):
         for cat in cats:
@@ -94,6 +102,103 @@ def parse_model_analysis(raw_response: str, order: BoxCoordinateOrder) -> FrameA
     if not isinstance(payload, dict):
         raise ModelOutputError("model response must be a JSON object")
     return FrameAnalysis.model_validate(normalize_analysis_payload(payload, order))
+
+
+def parse_model_analysis_with_repairs(
+    raw_response: str,
+    order: BoxCoordinateOrder,
+) -> tuple[FrameAnalysis, list[str]]:
+    """Parse output with narrow, audited repairs for deterministic cross-field rules.
+
+    The provider response remains byte-for-byte unchanged in history. This path
+    only repairs values whose correct replacement is fully determined by the
+    public contract; uncertain visual content is never inferred or altered.
+    """
+
+    payload = decode_model_json_object(raw_response)
+    if not isinstance(payload, dict):
+        raise ModelOutputError("model response must be a JSON object")
+    normalized = normalize_analysis_payload(payload, order)
+    warnings: list[str] = []
+    infants = normalized.get("infants")
+    overall_risk = normalized.get("overall_risk")
+    if isinstance(infants, list) and not infants and overall_risk in {"normal", "watch", "alert"}:
+        normalized["overall_risk"] = "unknown"
+        warnings.append(
+            "contract_value_repaired field=overall_risk "
+            f"from={overall_risk} to=unknown reason=no_infant_detected"
+        )
+    return FrameAnalysis.model_validate(normalized), warnings
+
+
+def deduplicate_analysis_boxes(analysis: FrameAnalysis) -> tuple[FrameAnalysis, list[str]]:
+    """Drop later exact box duplicates within a semantic category.
+
+    This is an explicit product-requested JSON post-processing rule, not visual
+    detection or IoU-based suppression. The raw provider response remains
+    unchanged in history.
+    """
+
+    warnings: list[str] = []
+
+    def unique_observations(items: list[Any], box_field: str, category: str) -> list[Any]:
+        seen: dict[tuple[int, int, int, int], int] = {}
+        result: list[Any] = []
+        for original_index, item in enumerate(items, start=1):
+            box = tuple(getattr(item, box_field).root)
+            kept_index = seen.get(box)
+            if kept_index is not None:
+                warnings.append(
+                    f"duplicate_box_dropped category={category} box={list(box)} "
+                    f"kept={kept_index} dropped={original_index}"
+                )
+                continue
+            seen[box] = original_index
+            result.append(item)
+        return result
+
+    infants = unique_observations(analysis.infants, "infant_box", "infant")
+    adults = unique_observations(analysis.adults, "adult_box", "adult")
+    cats = unique_observations(analysis.cats, "cat_box", "cat")
+
+    related_seen: dict[tuple[str, tuple[int, int, int, int]], tuple[int, int]] = {}
+    infants_with_unique_objects = []
+    for infant_index, infant in enumerate(infants, start=1):
+        related_objects = []
+        for object_index, related_object in enumerate(infant.related_objects, start=1):
+            box = tuple(related_object.box.root)
+            key = (related_object.kind.value, box)
+            kept_location = related_seen.get(key)
+            if kept_location is not None:
+                warnings.append(
+                    f"duplicate_box_dropped category={related_object.kind.value} box={list(box)} "
+                    f"kept=infant{kept_location[0]}.object{kept_location[1]} "
+                    f"dropped=infant{infant_index}.object{object_index}"
+                )
+                continue
+            related_seen[key] = (infant_index, object_index)
+            related_objects.append(related_object)
+        infants_with_unique_objects.append(infant.model_copy(update={"related_objects": related_objects}))
+
+    if not warnings:
+        return analysis, []
+    return (
+        analysis.model_copy(
+            update={
+                "infants": infants_with_unique_objects,
+                "adults": adults,
+                "cats": cats,
+            }
+        ),
+        warnings,
+    )
+
+
+def enforce_subject_limits(analysis: FrameAnalysis, *, max_infants: int, max_adults: int) -> None:
+    if len(analysis.infants) > max_infants:
+        raise SubjectLimitError(f"infants exceeds configured maximum {max_infants}: {len(analysis.infants)}")
+    if len(analysis.adults) > max_adults:
+        raise SubjectLimitError(f"adults exceeds configured maximum {max_adults}: {len(analysis.adults)}")
 
 
 def decode_model_json_object(raw_response: str) -> Any:

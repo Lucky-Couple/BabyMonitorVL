@@ -10,6 +10,8 @@ htmlcov/
 dist/
 frontend/dist/
 frontend/node_modules/
+frontend/.pnpm-store/
+/.pnpm-store/
 frontend/*.tsbuildinfo
 .env
 .env.*

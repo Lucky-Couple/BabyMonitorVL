@@ -3,6 +3,7 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import json
+import logging
 import re
 import shutil
 import time
@@ -15,14 +16,25 @@ from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 from pydantic import ValidationError
 
 from .config import Settings
-from .coordinates import CANONICAL_BOX_ORDER, ModelOutputError, model_box_order, parse_model_analysis
+from .coordinates import (
+    CANONICAL_BOX_ORDER,
+    ModelOutputError,
+    SubjectLimitError,
+    deduplicate_analysis_boxes,
+    enforce_subject_limits,
+    model_box_order,
+    parse_model_analysis_with_repairs,
+)
 from .events import EventHub
 from .ffmpeg import build_ffmpeg_command, collect_stderr, jpeg_dimensions, read_mjpeg_frames
 from .history import HistoryRecord, HistoryStore
 from .prompt import PROMPT_VERSION, build_prompt, output_schema
 from .providers import AnalysisRequest, VisionBackend
 from .providers.base import aggregate_usage, should_retry_provider_error, token_count
-from .schemas import FrameAnalysis, MonitorStartRequest, ProviderName
+from .schemas import AnalysisAttempt, FrameAnalysis, MonitorStartRequest, ProviderName
+
+
+logger = logging.getLogger(__name__)
 
 
 def utc_now() -> datetime:
@@ -62,6 +74,8 @@ def local_validation_correction(exc: Exception) -> str | None:
         return "root:invalid_json_envelope"
     if isinstance(exc, ModelOutputError):
         return "root:not_json_object"
+    if isinstance(exc, SubjectLimitError):
+        return "root:configured_subject_limit"
     if isinstance(exc, ValidationError):
         issues = []
         for item in exc.errors(include_input=False):
@@ -362,7 +376,11 @@ class MonitorService:
         model = self._model
         provider = self.providers[config.provider]
         box_order = model_box_order(config.provider, model)
-        schema = output_schema(box_order)
+        schema = output_schema(
+            box_order,
+            max_infants=self.settings.max_infants,
+            max_adults=self.settings.max_adults,
+        )
         prompt = build_prompt(schema, box_order)
         transport_schema = provider.prepare_output_schema(schema)
         generation_params = {
@@ -371,6 +389,8 @@ class MonitorService:
             "schema_profile": provider.schema_profile,
             "model_box_order": box_order.value,
             "canonical_box_order": CANONICAL_BOX_ORDER.value,
+            "max_infants": self.settings.max_infants,
+            "max_adults": self.settings.max_adults,
         }
         while self._session_id == session_id:
             frame = await self._queue.get()
@@ -407,6 +427,8 @@ class MonitorService:
             )
             raw_responses: list[str] = []
             errors: list[str] = []
+            warnings: list[str] = []
+            attempt_details: list[AnalysisAttempt] = []
             usage: dict[str, Any] = {}
             attempt_usages: list[dict[str, Any]] = []
             analysis: FrameAnalysis | None = None
@@ -415,18 +437,53 @@ class MonitorService:
             try:
                 for attempts in range(1, 3):
                     local_output_failure = False
+                    response_index: int | None = None
+                    attempt_usage: dict[str, Any] = {}
+                    attempt_warnings: list[str] = []
                     try:
                         result = await provider.analyze(request)
                         raw_responses.append(result.raw_response)
+                        response_index = len(raw_responses) - 1
+                        attempt_usage = dict(result.usage)
                         attempt_usages.append(result.usage)
                         usage = aggregate_usage(attempt_usages)
                         self._state["input_tokens"] += token_count(result.usage, "input_tokens")
                         self._state["output_tokens"] += token_count(result.usage, "output_tokens")
                         try:
-                            analysis = parse_model_analysis(result.raw_response, box_order)
-                        except (json.JSONDecodeError, ModelOutputError, ValidationError):
+                            candidate, contract_warnings = parse_model_analysis_with_repairs(
+                                result.raw_response,
+                                box_order,
+                            )
+                            candidate, duplicate_warnings = deduplicate_analysis_boxes(candidate)
+                            attempt_warnings = contract_warnings + duplicate_warnings
+                            warnings.extend(attempt_warnings)
+                            for warning in attempt_warnings:
+                                logger.warning(
+                                    "model output warning record_id=%s attempt=%s provider=%s model=%s %s",
+                                    record.id,
+                                    attempts,
+                                    config.provider.value,
+                                    model,
+                                    warning,
+                                )
+                            enforce_subject_limits(
+                                candidate,
+                                max_infants=self.settings.max_infants,
+                                max_adults=self.settings.max_adults,
+                            )
+                            analysis = candidate
+                        except (json.JSONDecodeError, ModelOutputError, SubjectLimitError, ValidationError):
                             local_output_failure = True
                             raise
+                        attempt_details.append(
+                            AnalysisAttempt(
+                                attempt=attempts,
+                                outcome="success",
+                                response_index=response_index,
+                                usage=attempt_usage,
+                                warnings=attempt_warnings,
+                            )
+                        )
                         break
                     except asyncio.CancelledError:
                         raise
@@ -435,7 +492,27 @@ class MonitorService:
                         safe_error = str(exc).replace(config.rtsp_url, redact_url(config.rtsp_url))
                         safe_error = redact_sensitive_text(safe_error, provider.sensitive_values())
                         errors.append(f"attempt {attempts}: {type(exc).__name__}: {safe_error}")
-                        if not should_retry_provider_error(exc):
+                        retryable = should_retry_provider_error(exc)
+                        will_retry = attempts == 1 and retryable
+                        retry_reason = None
+                        if will_retry:
+                            retry_reason = (
+                                f"local_validation:{correction}" if correction is not None else "retryable_provider_error"
+                            )
+                        attempt_details.append(
+                            AnalysisAttempt(
+                                attempt=attempts,
+                                outcome="validation_error" if local_output_failure else "provider_error",
+                                error_type=type(exc).__name__,
+                                error=safe_error,
+                                response_index=response_index,
+                                usage=attempt_usage,
+                                warnings=attempt_warnings,
+                                will_retry=will_retry,
+                                retry_reason=retry_reason,
+                            )
+                        )
+                        if not retryable:
                             break
                         if attempts == 1 and correction is not None:
                             request = AnalysisRequest(
@@ -447,6 +524,8 @@ class MonitorService:
                                     prompt + "\n\nVALIDATION CORRECTION: The previous output failed local response "
                                     + f"validation ({correction}). Return exactly one valid JSON object, include every "
                                     + "required key, and obey all enum and box constraints. "
+                                    + "Always return adult_presence and adults; adult_presence=present requires at "
+                                    + "least one adult observation, and adults=[] when it is not_detected or unknown. "
                                     + "Always return cats; use cats=[] when no real cat is clearly visible. "
                                     + "If no infant is visible, use infants=[] and overall_risk=unknown."
                                 ),
@@ -464,6 +543,8 @@ class MonitorService:
                         analysis=analysis,
                         raw_responses=raw_responses,
                         errors=errors,
+                        warnings=warnings,
+                        attempt_details=attempt_details,
                         latency_ms=latency_ms,
                         attempts=attempts,
                         usage=usage,
@@ -490,6 +571,8 @@ class MonitorService:
                         analysis=None,
                         raw_responses=raw_responses,
                         errors=errors,
+                        warnings=warnings,
+                        attempt_details=attempt_details,
                         latency_ms=latency_ms,
                         attempts=attempts,
                         usage=usage,
@@ -512,12 +595,24 @@ class MonitorService:
                 await self._publish_status()
             except asyncio.CancelledError:
                 latency_ms = (time.perf_counter() - started) * 1000
+                cancellation_error = "analysis canceled because the session stopped"
+                if attempts > 0 and not any(item.attempt == attempts for item in attempt_details):
+                    attempt_details.append(
+                        AnalysisAttempt(
+                            attempt=attempts,
+                            outcome="cancelled",
+                            error_type="CancelledError",
+                            error=cancellation_error,
+                        )
+                    )
                 await self.history.update(
                     record.id,
                     status="error",
                     analysis=None,
                     raw_responses=raw_responses,
-                    errors=[*errors, "analysis canceled because the session stopped"],
+                    errors=[*errors, cancellation_error],
+                    warnings=warnings,
+                    attempt_details=attempt_details,
                     latency_ms=latency_ms,
                     attempts=attempts,
                     usage=usage,

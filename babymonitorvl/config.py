@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 
@@ -23,6 +23,8 @@ class Settings:
     default_gemini_model: str = os.getenv("DEFAULT_GEMINI_MODEL", "gemini-3.5-flash")
     model_timeout_seconds: float = _env_float("MODEL_TIMEOUT_SECONDS", 60.0)
     history_max_bytes: int = _env_int("HISTORY_MAX_BYTES", 1024 * 1024 * 1024)
+    max_infants: int = field(default_factory=lambda: _env_int("MAX_INFANTS", 1))
+    max_adults: int = field(default_factory=lambda: _env_int("MAX_ADULTS", 4))
     ffmpeg_binary: str = os.getenv("FFMPEG_BINARY", "ffmpeg")
     frontend_dist: Path = Path(
         os.getenv(
@@ -30,3 +32,8 @@ class Settings:
             str(Path(__file__).resolve().parent.parent / "frontend" / "dist"),
         )
     )
+
+    def __post_init__(self) -> None:
+        for name, value in (("MAX_INFANTS", self.max_infants), ("MAX_ADULTS", self.max_adults)):
+            if value < 1 or value > 64:
+                raise ValueError(f"{name} must be between 1 and 64")

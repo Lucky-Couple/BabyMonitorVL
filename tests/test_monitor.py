@@ -116,10 +116,12 @@ def valid_empty_analysis_result() -> ProviderCallResult:
     return ProviderCallResult(
         json.dumps(
             {
-                "schema_version": "1.1",
+                "schema_version": "1.2",
                 "summary": "No infant is visible.",
                 "image_quality": "good",
                 "infants": [],
+                "adult_presence": "not_detected",
+                "adults": [],
                 "cats": [],
                 "overall_risk": "unknown",
                 "risk_reasons": [],
@@ -134,6 +136,59 @@ class ProviderJsonErrorRetryBackend(JsonRetryBackend):
         if len(self.prompts) == 1:
             raise json.JSONDecodeError("provider response was not JSON", "x", 0)
         return valid_empty_analysis_result()
+
+
+class DuplicateBoxBackend(JsonRetryBackend):
+    async def analyze(self, request: AnalysisRequest) -> ProviderCallResult:
+        self.prompts.append(request.prompt)
+        infant = {
+            "infant_box": [100, 200, 500, 700],
+            "face_box": None,
+            "posture": "supine",
+            "face_visibility": "not_visible",
+            "blanket_coverage": "absent",
+            "related_objects": [],
+            "risk_level": "normal",
+            "confidence": 0.9,
+            "evidence": ["Infant is visible."],
+        }
+        return ProviderCallResult(
+            json.dumps(
+                {
+                    "schema_version": "1.2",
+                    "summary": "One infant is visible.",
+                    "image_quality": "good",
+                    "infants": [infant, infant],
+                    "adult_presence": "not_detected",
+                    "adults": [],
+                    "cats": [],
+                    "overall_risk": "normal",
+                    "risk_reasons": [],
+                }
+            ),
+            usage={"input_tokens": 100, "output_tokens": 50},
+        )
+
+
+class EmptySceneNormalRiskBackend(JsonRetryBackend):
+    async def analyze(self, request: AnalysisRequest) -> ProviderCallResult:
+        self.prompts.append(request.prompt)
+        return ProviderCallResult(
+            json.dumps(
+                {
+                    "schema_version": "1.2",
+                    "summary": "No infant is visible.",
+                    "image_quality": "good",
+                    "infants": [],
+                    "adult_presence": "not_detected",
+                    "adults": [],
+                    "cats": [],
+                    "overall_risk": "normal",
+                    "risk_reasons": ["No infant detected in frame"],
+                }
+            ),
+            usage={"input_tokens": 100, "output_tokens": 25},
+        )
 
 
 @pytest.mark.asyncio
@@ -170,17 +225,27 @@ async def test_analysis_retry_adds_json_validation_correction(tmp_path) -> None:
     assert "VALIDATION CORRECTION" not in backend.prompts[0]
     assert "root:invalid_json_envelope" in backend.prompts[1]
     assert "Return exactly one valid JSON object" in backend.prompts[1]
+    assert "Always return adult_presence and adults" in backend.prompts[1]
     records, _ = await history.list(limit=10)
     assert records[0].status == "success"
     assert records[0].attempts == 2
+    detail = await history.get(records[0].id)
+    assert detail is not None
+    assert [item.outcome for item in detail.attempt_details] == ["validation_error", "success"]
+    assert detail.attempt_details[0].response_index == 0
+    assert detail.attempt_details[0].will_retry is True
+    assert detail.attempt_details[0].retry_reason == "local_validation:root:invalid_json_envelope"
+    assert detail.attempt_details[1].response_index == 1
+    assert detail.attempt_details[1].will_retry is False
 
 
 @pytest.mark.asyncio
 async def test_provider_json_error_retries_without_model_output_correction(tmp_path) -> None:
     backend = ProviderJsonErrorRetryBackend()
+    history = HistoryStore(1024 * 1024)
     service = MonitorService(
         Settings(frontend_dist=tmp_path),
-        HistoryStore(1024 * 1024),
+        history,
         EventHub(),
         {ProviderName.OLLAMA: backend},
     )
@@ -207,3 +272,97 @@ async def test_provider_json_error_retries_without_model_output_correction(tmp_p
     assert len(backend.prompts) == 2
     assert "VALIDATION CORRECTION" not in backend.prompts[0]
     assert "VALIDATION CORRECTION" not in backend.prompts[1]
+    records, _ = await history.list(limit=10)
+    detail = await history.get(records[0].id)
+    assert detail is not None
+    assert [item.outcome for item in detail.attempt_details] == ["provider_error", "success"]
+    assert detail.attempt_details[0].response_index is None
+    assert detail.attempt_details[0].retry_reason == "retryable_provider_error"
+    assert detail.attempt_details[1].response_index == 0
+
+
+@pytest.mark.asyncio
+async def test_empty_scene_normal_risk_is_audited_and_does_not_retry(tmp_path, caplog) -> None:
+    caplog.set_level("WARNING", logger="babymonitorvl.monitor")
+    backend = EmptySceneNormalRiskBackend()
+    history = HistoryStore(1024 * 1024)
+    service = MonitorService(
+        Settings(frontend_dist=tmp_path),
+        history,
+        EventHub(),
+        {ProviderName.OLLAMA: backend},
+    )
+    session_id = "empty-scene-repair-session"
+    service._session_id = session_id
+    service._config = MonitorStartRequest(
+        rtsp_url="rtsp://camera.invalid/stream",
+        provider=ProviderName.OLLAMA,
+        model="test-model",
+    )
+    service._model = "test-model"
+    await service._queue.put(frame(1))
+    task = asyncio.create_task(service._analysis_loop(session_id))
+
+    async def wait_for_completion() -> None:
+        while service._state["completed_count"] < 1:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_completion(), timeout=1)
+    service._session_id = None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    records, _ = await history.list(limit=10)
+    detail = await history.get(records[0].id)
+    assert detail is not None
+    assert detail.analysis is not None
+    assert detail.analysis.overall_risk.value == "unknown"
+    assert detail.attempts == 1
+    assert len(backend.prompts) == 1
+    assert detail.errors == []
+    assert '"overall_risk": "normal"' in detail.raw_responses[0]
+    assert detail.warnings == detail.attempt_details[0].warnings
+    assert "contract_value_repaired field=overall_risk" in detail.warnings[0]
+    assert "contract_value_repaired field=overall_risk" in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_duplicate_boxes_are_dropped_logged_and_audited(tmp_path, caplog) -> None:
+    caplog.set_level("WARNING", logger="babymonitorvl.monitor")
+    backend = DuplicateBoxBackend()
+    history = HistoryStore(1024 * 1024)
+    service = MonitorService(
+        Settings(frontend_dist=tmp_path, max_infants=1, max_adults=4),
+        history,
+        EventHub(),
+        {ProviderName.OLLAMA: backend},
+    )
+    session_id = "duplicate-box-session"
+    service._session_id = session_id
+    service._config = MonitorStartRequest(
+        rtsp_url="rtsp://camera.invalid/stream",
+        provider=ProviderName.OLLAMA,
+        model="test-model",
+    )
+    service._model = "test-model"
+    await service._queue.put(frame(1))
+    task = asyncio.create_task(service._analysis_loop(session_id))
+
+    async def wait_for_completion() -> None:
+        while service._state["completed_count"] < 1:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_completion(), timeout=1)
+    service._session_id = None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    records, _ = await history.list(limit=10)
+    detail = await history.get(records[0].id)
+    assert detail is not None
+    assert detail.analysis is not None
+    assert len(detail.analysis.infants) == 1
+    assert detail.attempts == 1
+    assert detail.warnings == detail.attempt_details[0].warnings
+    assert "duplicate_box_dropped category=infant" in detail.warnings[0]
+    assert "duplicate_box_dropped category=infant" in caplog.text

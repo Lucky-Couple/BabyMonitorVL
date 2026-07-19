@@ -3,7 +3,7 @@ from datetime import timedelta
 import pytest
 
 from babymonitorvl.history import HistoryRecord, HistoryStore, utc_now
-from babymonitorvl.schemas import ProviderName
+from babymonitorvl.schemas import AnalysisAttempt, ProviderName
 
 
 def make_record(record_id: str, image_size: int = 20, age_seconds: int = 0) -> HistoryRecord:
@@ -54,6 +54,27 @@ async def test_history_summary_exposes_token_usage() -> None:
         analysis=None,
         raw_responses=["invalid"],
         errors=["parse failed"],
+        warnings=["duplicate_box_dropped category=infant"],
+        attempt_details=[
+            AnalysisAttempt(
+                attempt=1,
+                outcome="validation_error",
+                error_type="JSONDecodeError",
+                error="parse failed",
+                response_index=0,
+                usage={"input_tokens": 120, "output_tokens": 40},
+                warnings=["duplicate_box_dropped category=infant"],
+                will_retry=True,
+                retry_reason="local_validation:root:invalid_json_envelope",
+            ),
+            AnalysisAttempt(
+                attempt=2,
+                outcome="provider_error",
+                error_type="RuntimeError",
+                error="provider failed",
+                usage={"input_tokens": 120, "output_tokens": 40},
+            ),
+        ],
         latency_ms=10,
         attempts=2,
         usage={"input_tokens": 240, "output_tokens": 80, "total_tokens": 320},
@@ -61,3 +82,12 @@ async def test_history_summary_exposes_token_usage() -> None:
     items, _ = await store.list()
     assert items[0].input_tokens == 240
     assert items[0].output_tokens == 80
+    detail = await store.get("tokens")
+    assert detail is not None
+    serialized = detail.as_item()
+    assert serialized.attempt_details[0].attempt == 1
+    assert serialized.attempt_details[0].will_retry is True
+    assert serialized.attempt_details[0].response_index == 0
+    assert serialized.warnings == ["duplicate_box_dropped category=infant"]
+    assert serialized.attempt_details[0].warnings == ["duplicate_box_dropped category=infant"]
+    assert serialized.attempt_details[1].response_index is None
