@@ -25,6 +25,8 @@ Open <http://127.0.0.1:8000>. The Compose configuration maps `host.docker.intern
 
 Subject limits default to `MAX_INFANTS=1` and `MAX_ADULTS=4`. Both values accept integers from 1 through 64. They are injected into the shared prompt and Ollama JSON Schema; Gemini's compact transport profile omits `maxItems`, so the prompt plus local post-response validation enforce the same configured limits.
 
+Every environment-backed `Settings` default is read when a `Settings()` instance is constructed, not when `babymonitorvl.config` is imported. Preserve that lifecycle for new settings and add a post-import monkeypatch regression test for every new environment variable. Constructing settings rejects non-positive `HISTORY_MAX_BYTES`, and `MODEL_TIMEOUT_SECONDS` must be both finite and greater than zero; configuration errors should fail at startup rather than produce an empty cache or invalid timeout behavior later.
+
 For Gemini, either set `GEMINI_API_KEY` in the untracked `.env` or use the page's Gemini Key dialog. A dialog value is validated and kept only in backend process memory; it is not browser-persisted and disappears on restart. Because the MVP has no authentication, configure credentials only over the default loopback binding or trusted HTTPS. Selected frames leave the machine when Gemini is active.
 
 ## Native development
@@ -122,7 +124,7 @@ Gemini smoke criteria add explicit confirmation that sending the chosen frame to
 
 - Follow the [provider compatibility engineering method](PROVIDER_COMPATIBILITY.md) and identify the failing layer before changing prompts or request parameters.
 - Inspect `/api/monitor/status` for queue pressure, dropped frames, latency, and redacted errors.
-- Inspect the selected history record before changing prompts: raw response, schema, prompt version, coordinate metadata, and attempts identify whether the failure is generation, parsing, conversion, or rendering.
+- Inspect the selected history record before changing prompts: raw response, schema, prompt version, coordinate metadata, and attempts identify whether the failure is generation, parsing, conversion, or rendering. The top-level prompt is the session baseline; each attempt's prompt is the exact text sent for that call and is authoritative when a retry correction was applied.
 - Compare the annotated history image, not the live preview.
 - Use `/api/prompt` for the canonical YXYX contract. Session history contains the actual model-specific prompt/schema.
 - A JSON parse failure is not proof that a model lacks vision support; inspect the raw provider response and provider error separately.

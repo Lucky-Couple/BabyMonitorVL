@@ -116,7 +116,7 @@ def valid_empty_analysis_result() -> ProviderCallResult:
     return ProviderCallResult(
         json.dumps(
             {
-                "schema_version": "1.2",
+                "schema_version": "1.3",
                 "summary": "No infant is visible.",
                 "image_quality": "good",
                 "infants": [],
@@ -143,9 +143,9 @@ class DuplicateBoxBackend(JsonRetryBackend):
         self.prompts.append(request.prompt)
         infant = {
             "infant_box": [100, 200, 500, 700],
-            "face_box": None,
+            "mouth_nose_box": None,
             "posture": "supine",
-            "face_visibility": "not_visible",
+            "mouth_nose_occlusion": "not_visible",
             "blanket_coverage": "absent",
             "related_objects": [],
             "risk_level": "normal",
@@ -155,7 +155,7 @@ class DuplicateBoxBackend(JsonRetryBackend):
         return ProviderCallResult(
             json.dumps(
                 {
-                    "schema_version": "1.2",
+                    "schema_version": "1.3",
                     "summary": "One infant is visible.",
                     "image_quality": "good",
                     "infants": [infant, infant],
@@ -176,7 +176,7 @@ class EmptySceneNormalRiskBackend(JsonRetryBackend):
         return ProviderCallResult(
             json.dumps(
                 {
-                    "schema_version": "1.2",
+                    "schema_version": "1.3",
                     "summary": "No infant is visible.",
                     "image_quality": "good",
                     "infants": [],
@@ -226,12 +226,17 @@ async def test_analysis_retry_adds_json_validation_correction(tmp_path) -> None:
     assert "root:invalid_json_envelope" in backend.prompts[1]
     assert "Return exactly one valid JSON object" in backend.prompts[1]
     assert "Always return adult_presence and adults" in backend.prompts[1]
+    assert "whose box overlaps mouth_nose_box" in backend.prompts[1]
     records, _ = await history.list(limit=10)
     assert records[0].status == "success"
     assert records[0].attempts == 2
     detail = await history.get(records[0].id)
     assert detail is not None
     assert [item.outcome for item in detail.attempt_details] == ["validation_error", "success"]
+    assert detail.prompt == backend.prompts[0]
+    assert [item.prompt for item in detail.attempt_details] == backend.prompts
+    assert "VALIDATION CORRECTION" not in detail.attempt_details[0].prompt
+    assert "VALIDATION CORRECTION" in detail.attempt_details[1].prompt
     assert detail.attempt_details[0].response_index == 0
     assert detail.attempt_details[0].will_retry is True
     assert detail.attempt_details[0].retry_reason == "local_validation:root:invalid_json_envelope"
@@ -276,6 +281,9 @@ async def test_provider_json_error_retries_without_model_output_correction(tmp_p
     detail = await history.get(records[0].id)
     assert detail is not None
     assert [item.outcome for item in detail.attempt_details] == ["provider_error", "success"]
+    assert detail.prompt == backend.prompts[0]
+    assert [item.prompt for item in detail.attempt_details] == backend.prompts
+    assert all("VALIDATION CORRECTION" not in item.prompt for item in detail.attempt_details)
     assert detail.attempt_details[0].response_index is None
     assert detail.attempt_details[0].retry_reason == "retryable_provider_error"
     assert detail.attempt_details[1].response_index == 0

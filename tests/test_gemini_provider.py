@@ -154,10 +154,15 @@ def test_gemini_schema_adapter_keeps_only_documented_transport_subset() -> None:
 def test_project_schema_is_google_transport_compatible_after_adaptation() -> None:
     adapted = gemini_compatible_schema(output_schema(BoxCoordinateOrder.YXYX))
 
-    assert adapted["properties"]["schema_version"]["enum"] == ["1.2"]
+    assert adapted["properties"]["schema_version"]["enum"] == ["1.3"]
     assert "adult_presence" in adapted["required"]
     assert "adults" in adapted["required"]
     assert "adult_box" in adapted["properties"]["adults"]["items"]["properties"]
+    infant_properties = adapted["properties"]["infants"]["items"]["properties"]
+    infant_required = adapted["properties"]["infants"]["items"]["required"]
+    assert "mouth_nose_box" in infant_properties
+    assert "mouth_nose_box" in infant_required
+    assert "mouth_nose_occlusion" in infant_properties
     assert gemini_compatible_schema(adapted) == adapted
 
     def assert_keywords(node: dict, *, property_map: bool = False) -> None:

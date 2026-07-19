@@ -1,8 +1,24 @@
 export type ProviderName = "ollama" | "gemini";
 export type Risk = "normal" | "watch" | "alert" | "unknown";
 export type Box = [number, number, number, number];
+export type MouthNoseOcclusion = "clear" | "partially_covered" | "fully_covered" | "not_visible" | "unknown";
+export type BlanketCoverage =
+  | "absent"
+  | "present_not_covering"
+  | "lower_body"
+  | "torso"
+  | "near_mouth_nose"
+  | "partially_covering_mouth_nose"
+  | "covering_mouth_nose"
+  | "unknown";
 export type RelatedObjectKind = "blanket" | "pillow" | "toy" | "hand" | "other_occluder";
-export type ObjectRelation = "near_face" | "covers_face" | "covers_body" | "near_body" | "unknown";
+export type ObjectRelation =
+  | "near_mouth_nose"
+  | "partially_covers_mouth_nose"
+  | "covers_mouth_nose"
+  | "covers_body"
+  | "near_body"
+  | "unknown";
 
 export interface ProviderInfo {
   available: boolean;
@@ -24,10 +40,10 @@ export interface RelatedObject {
 
 export interface InfantObservation {
   infant_box: Box;
-  face_box: Box | null;
+  mouth_nose_box: Box | null;
   posture: string;
-  face_visibility: string;
-  blanket_coverage: string;
+  mouth_nose_occlusion: MouthNoseOcclusion;
+  blanket_coverage: BlanketCoverage;
   related_objects: RelatedObject[];
   risk_level: Risk;
   confidence: number;
@@ -50,7 +66,7 @@ export interface AdultObservation {
 }
 
 export interface FrameAnalysis {
-  schema_version: "1.2";
+  schema_version: "1.3";
   summary: string;
   image_quality: string;
   infants: InfantObservation[];
@@ -83,6 +99,7 @@ export interface HistorySummary {
 
 export interface AnalysisAttempt {
   attempt: number;
+  prompt: string;
   outcome: "success" | "validation_error" | "provider_error" | "cancelled";
   error_type: string | null;
   error: string | null;

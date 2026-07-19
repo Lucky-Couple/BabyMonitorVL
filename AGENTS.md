@@ -24,9 +24,10 @@ The MVP intentionally uses a multimodal LLM/VLM for all semantic visual interpre
 - No audio, push, SMS, email, or audible alarm is part of this MVP.
 - API and UI coordinates are always canonical `[ymin, xmin, ymax, xmax]`, integer normalized to `0..1000`.
 - Ollama model basenames matching `qwen*` use model-native `[xmin, ymin, xmax, ymax]`; convert every box to canonical order before Pydantic validation and API/history exposure. Gemini and unknown model families use canonical order unless a tested model adapter says otherwise.
-- Never silently clamp, reorder, smooth, or fabricate model boxes. The sole deduplication exception is exact coordinate equality within the same semantic category: keep the first box, drop later boxes, preserve the raw response, emit a server warning, and store that warning in per-call history. Never add IoU/fuzzy suppression without an explicit product decision.
+- `mouth_nose_box` is the sole permitted limited hidden-region estimate: the VLM may infer its spatial location only from connected visible head geometry, orientation, outline, and nearby facial landmarks. Partial/full occlusion still requires visible object pixels overlapping that region. Never extend this exception to airflow, breathing, suffocation, health, hidden-body reconstruction, or temporal inference.
+- Never silently clamp, reorder, smooth, or fabricate model boxes. The sole deduplication exception is exact coordinate equality within the same semantic category: keep the first box, drop later boxes, preserve the raw response, emit a server warning, and store that warning in per-call history. Related objects are deduplicated only within one infant observation; the same object box may remain associated with different infants. Never add IoU/fuzzy suppression without an explicit product decision.
 - Preserve provider raw responses byte-for-character in history. Parsing may tolerate only one JSON value with an optional `json`/empty Markdown fence wrapper; never discard prose, accept a second JSON value, or use greedy substring extraction to hide malformed output.
-- Preserve explicit per-call audit mapping between attempt number, outcome, sanitized error, response index, usage, and retry reason. Provider failures can occur before a response or usage exists, so never correlate parallel arrays by list position.
+- Preserve explicit per-call audit mapping between attempt number, the exact prompt sent for that call, outcome, sanitized error, response index, usage, and retry reason. Provider failures can occur before a response or usage exists, so never correlate parallel arrays by list position. The top-level history prompt is only the immutable session baseline; retry corrections belong to the corresponding attempt record.
 
 See [Architecture](docs/ARCHITECTURE.md), [Analysis contract](docs/ANALYSIS_CONTRACT.md), [provider compatibility method](docs/PROVIDER_COMPATIBILITY.md), and [Gemini/Gemma provider rules](docs/GEMINI_PROVIDER.md) before touching scheduling, schemas, prompts, providers, or coordinates.
 
@@ -74,7 +75,7 @@ While editing:
 - Add or update tests at the same time as behavior changes.
 - Keep backend Pydantic types and frontend TypeScript types synchronized.
 - Keep UI enum labels stable and preserve English `summary`/`evidence` for provider comparison.
-- The overlay category palette is stable: infant blue, face green, blanket amber, pillow indigo, toy orange, hand cyan, other occluder red, cat purple, adult pink. Change it only on explicit UI direction.
+- The overlay category palette is stable: infant blue, mouth/nose green, blanket amber, pillow indigo, toy orange, hand cyan, other occluder red, cat purple, adult pink. Change it only on explicit UI direction.
 - Current overlay boxes are thin (`2` main, `1.5` history) and label backgrounds use `fillOpacity=0.45`. Do not add label displacement, fuzzy deduplication, leader lines, or CV-derived corrections without explicit approval.
 
 Before handoff:
@@ -111,7 +112,7 @@ Adding a model-family coordinate exception requires:
 
 - a narrow, documented matcher in `model_box_order()`;
 - provider/model-specific schema description and prompt instruction;
-- conversion of infant, face, related-object, adult, cat, and all future box fields;
+- conversion of infant, mouth/nose, related-object, adult, cat, and all future box fields;
 - tests proving raw responses remain unchanged and API/UI output is canonical.
 
 ## Security and privacy

@@ -58,6 +58,7 @@ async def test_history_summary_exposes_token_usage() -> None:
         attempt_details=[
             AnalysisAttempt(
                 attempt=1,
+                prompt="prompt",
                 outcome="validation_error",
                 error_type="JSONDecodeError",
                 error="parse failed",
@@ -69,6 +70,7 @@ async def test_history_summary_exposes_token_usage() -> None:
             ),
             AnalysisAttempt(
                 attempt=2,
+                prompt="prompt\n\nVALIDATION CORRECTION: retry",
                 outcome="provider_error",
                 error_type="RuntimeError",
                 error="provider failed",
@@ -86,8 +88,10 @@ async def test_history_summary_exposes_token_usage() -> None:
     assert detail is not None
     serialized = detail.as_item()
     assert serialized.attempt_details[0].attempt == 1
+    assert serialized.attempt_details[0].prompt == "prompt"
     assert serialized.attempt_details[0].will_retry is True
     assert serialized.attempt_details[0].response_index == 0
     assert serialized.warnings == ["duplicate_box_dropped category=infant"]
     assert serialized.attempt_details[0].warnings == ["duplicate_box_dropped category=infant"]
     assert serialized.attempt_details[1].response_index is None
+    assert "VALIDATION CORRECTION" in serialized.attempt_details[1].prompt

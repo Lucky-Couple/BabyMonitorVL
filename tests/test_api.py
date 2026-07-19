@@ -16,7 +16,7 @@ async def test_prompt_and_stopped_status_are_available_without_models(tmp_path) 
         prompt = await client.get("/api/prompt")
         status = await client.get("/api/monitor/status")
     assert prompt.status_code == 200
-    assert prompt.json()["version"] == "baby-monitor-single-frame-v7-risk-consistency"
+    assert prompt.json()["version"] == "baby-monitor-single-frame-v8-mouth-nose-occlusion"
     assert "JSON_SCHEMA" in prompt.json()["prompt"]
     assert prompt.json()["output_schema"]["properties"]["infants"]["maxItems"] == 1
     assert prompt.json()["output_schema"]["properties"]["adults"]["maxItems"] == 4

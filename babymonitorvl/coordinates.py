@@ -75,8 +75,8 @@ def normalize_analysis_payload(payload: dict[str, Any], order: BoxCoordinateOrde
             if not isinstance(infant, dict):
                 continue
             infant["infant_box"] = normalize_box(infant.get("infant_box"))
-            if infant.get("face_box") is not None:
-                infant["face_box"] = normalize_box(infant.get("face_box"))
+            if infant.get("mouth_nose_box") is not None:
+                infant["mouth_nose_box"] = normalize_box(infant.get("mouth_nose_box"))
             related_objects = infant.get("related_objects")
             if isinstance(related_objects, list):
                 for related_object in related_objects:
@@ -161,37 +161,35 @@ def deduplicate_analysis_boxes(analysis: FrameAnalysis) -> tuple[FrameAnalysis, 
     adults = unique_observations(analysis.adults, "adult_box", "adult")
     cats = unique_observations(analysis.cats, "cat_box", "cat")
 
-    related_seen: dict[tuple[str, tuple[int, int, int, int]], tuple[int, int]] = {}
     infants_with_unique_objects = []
     for infant_index, infant in enumerate(infants, start=1):
+        related_seen: dict[tuple[str, tuple[int, int, int, int]], int] = {}
         related_objects = []
         for object_index, related_object in enumerate(infant.related_objects, start=1):
             box = tuple(related_object.box.root)
             key = (related_object.kind.value, box)
-            kept_location = related_seen.get(key)
-            if kept_location is not None:
+            kept_index = related_seen.get(key)
+            if kept_index is not None:
                 warnings.append(
                     f"duplicate_box_dropped category={related_object.kind.value} box={list(box)} "
-                    f"kept=infant{kept_location[0]}.object{kept_location[1]} "
+                    f"kept=infant{infant_index}.object{kept_index} "
                     f"dropped=infant{infant_index}.object{object_index}"
                 )
                 continue
-            related_seen[key] = (infant_index, object_index)
+            related_seen[key] = object_index
             related_objects.append(related_object)
         infants_with_unique_objects.append(infant.model_copy(update={"related_objects": related_objects}))
 
     if not warnings:
         return analysis, []
-    return (
-        analysis.model_copy(
-            update={
-                "infants": infants_with_unique_objects,
-                "adults": adults,
-                "cats": cats,
-            }
-        ),
-        warnings,
+    deduplicated = analysis.model_copy(
+        update={
+            "infants": infants_with_unique_objects,
+            "adults": adults,
+            "cats": cats,
+        }
     )
+    return FrameAnalysis.model_validate(deduplicated.model_dump(mode="python")), warnings
 
 
 def enforce_subject_limits(analysis: FrameAnalysis, *, max_infants: int, max_adults: int) -> None:

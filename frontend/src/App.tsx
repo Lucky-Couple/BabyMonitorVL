@@ -37,16 +37,19 @@ const labels: Record<string, string> = {
   prone: "俯卧",
   side_lying: "侧卧",
   not_lying: "非躺卧",
-  visible: "脸部可见",
-  partially_occluded: "脸部部分遮挡",
-  fully_occluded: "脸部完全遮挡",
-  not_visible: "脸部不可见",
+  clear: "口鼻无遮挡",
+  partially_covered: "口鼻部分被覆盖",
+  fully_covered: "口鼻完全被覆盖",
+  not_visible: "口鼻未直接可见",
   absent: "未见被子",
   present_not_covering: "被子未盖住婴儿",
   lower_body: "覆盖下半身",
   torso: "覆盖躯干",
-  near_face: "靠近脸部",
-  covering_face: "覆盖脸部",
+  near_mouth_nose: "靠近口鼻",
+  partially_covering_mouth_nose: "部分覆盖口鼻",
+  covering_mouth_nose: "覆盖口鼻",
+  partially_covers_mouth_nose: "部分覆盖口鼻",
+  covers_mouth_nose: "覆盖口鼻",
   unknown: "未知",
   normal: "正常",
   watch: "需关注",
@@ -66,7 +69,7 @@ const labels: Record<string, string> = {
 
 const overlayColors: Record<string, string> = {
   infant: "#56b8ff",
-  face: "#55e6a5",
+  mouth_nose: "#55e6a5",
   blanket: "#f2b84b",
   pillow: "#8b9cff",
   toy: "#ff8a5b",
@@ -152,7 +155,9 @@ function analysisBoxes(analysis: FrameAnalysis | null | undefined): OverlayBox[]
       label: subjectLabel("婴儿", index, analysis.infants.length),
       color: overlayColors.infant,
     });
-    if (infant.face_box) result.push({ box: infant.face_box, label: "脸部", color: overlayColors.face });
+    if (infant.mouth_nose_box) {
+      result.push({ box: infant.mouth_nose_box, label: "口鼻", color: overlayColors.mouth_nose });
+    }
     infant.related_objects.forEach((object) => {
       result.push({
         box: object.box,
@@ -294,6 +299,12 @@ function AttemptAudit({ detail }: { detail: HistoryDetail }) {
                 <JsonCode value={attempt.usage} />
               </details>
             )}
+            <details className="attempt-prompt">
+              <summary>
+                本次实际 Prompt{attempt.prompt === detail.prompt ? " · 基线" : " · 含重试修正"}
+              </summary>
+              <pre>{attempt.prompt}</pre>
+            </details>
           </section>
         );
       })}
@@ -337,7 +348,7 @@ function AnalysisPanel({ analysis }: { analysis: FrameAnalysis | null | undefine
           </div>
           <dl>
             <div><dt>姿势</dt><dd>{labels[infant.posture] ?? infant.posture}</dd></div>
-            <div><dt>脸部</dt><dd>{labels[infant.face_visibility] ?? infant.face_visibility}</dd></div>
+            <div><dt>口鼻遮挡</dt><dd>{labels[infant.mouth_nose_occlusion] ?? infant.mouth_nose_occlusion}</dd></div>
             <div><dt>被子</dt><dd>{labels[infant.blanket_coverage] ?? infant.blanket_coverage}</dd></div>
             <div><dt>置信度</dt><dd>{Math.round(infant.confidence * 100)}%</dd></div>
           </dl>
@@ -831,7 +842,7 @@ export default function App() {
               const attempt = detail.attempt_details.find((item) => item.response_index === index);
               return <div className="response-attempt" key={index}><div className="attempt-label">调用 {attempt?.attempt ?? index + 1} · 模型响应 {index + 1}</div><JsonCode value={response} /></div>;
             }) : <pre>No response</pre>}</details>
-            <details><summary>实际发送的 Prompt</summary><pre>{detail.prompt}</pre></details>
+            <details><summary>会话基线 Prompt（首次调用）</summary><pre>{detail.prompt}</pre></details>
             <details><summary>JSON Schema</summary><JsonCode value={detail.output_schema} /></details>
             <details><summary>调用参数与汇总用量</summary><JsonCode value={{ generation: detail.generation_params }} /></details>
           </div>

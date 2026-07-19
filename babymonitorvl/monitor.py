@@ -478,6 +478,7 @@ class MonitorService:
                         attempt_details.append(
                             AnalysisAttempt(
                                 attempt=attempts,
+                                prompt=request.prompt,
                                 outcome="success",
                                 response_index=response_index,
                                 usage=attempt_usage,
@@ -502,6 +503,7 @@ class MonitorService:
                         attempt_details.append(
                             AnalysisAttempt(
                                 attempt=attempts,
+                                prompt=request.prompt,
                                 outcome="validation_error" if local_output_failure else "provider_error",
                                 error_type=type(exc).__name__,
                                 error=safe_error,
@@ -526,6 +528,10 @@ class MonitorService:
                                     + "required key, and obey all enum and box constraints. "
                                     + "Always return adult_presence and adults; adult_presence=present requires at "
                                     + "least one adult observation, and adults=[] when it is not_detected or unknown. "
+                                    + "For every infant, always return mouth_nose_box and mouth_nose_occlusion; "
+                                    + "partial/full coverage requires a boxed related object whose box overlaps "
+                                    + "mouth_nose_box and has a matching relation; use not_visible or unknown "
+                                    + "instead of inventing coverage. "
                                     + "Always return cats; use cats=[] when no real cat is clearly visible. "
                                     + "If no infant is visible, use infants=[] and overall_risk=unknown."
                                 ),
@@ -600,6 +606,7 @@ class MonitorService:
                     attempt_details.append(
                         AnalysisAttempt(
                             attempt=attempts,
+                            prompt=request.prompt,
                             outcome="cancelled",
                             error_type="CancelledError",
                             error=cancellation_error,

@@ -46,10 +46,10 @@ class Posture(str, Enum):
     UNKNOWN = "unknown"
 
 
-class FaceVisibility(str, Enum):
-    VISIBLE = "visible"
-    PARTIALLY_OCCLUDED = "partially_occluded"
-    FULLY_OCCLUDED = "fully_occluded"
+class MouthNoseOcclusion(str, Enum):
+    CLEAR = "clear"
+    PARTIALLY_COVERED = "partially_covered"
+    FULLY_COVERED = "fully_covered"
     NOT_VISIBLE = "not_visible"
     UNKNOWN = "unknown"
 
@@ -59,8 +59,9 @@ class BlanketCoverage(str, Enum):
     PRESENT_NOT_COVERING = "present_not_covering"
     LOWER_BODY = "lower_body"
     TORSO = "torso"
-    NEAR_FACE = "near_face"
-    COVERING_FACE = "covering_face"
+    NEAR_MOUTH_NOSE = "near_mouth_nose"
+    PARTIALLY_COVERING_MOUTH_NOSE = "partially_covering_mouth_nose"
+    COVERING_MOUTH_NOSE = "covering_mouth_nose"
     UNKNOWN = "unknown"
 
 
@@ -73,8 +74,9 @@ class RelatedObjectKind(str, Enum):
 
 
 class ObjectRelation(str, Enum):
-    NEAR_FACE = "near_face"
-    COVERS_FACE = "covers_face"
+    NEAR_MOUTH_NOSE = "near_mouth_nose"
+    PARTIALLY_COVERS_MOUTH_NOSE = "partially_covers_mouth_nose"
+    COVERS_MOUTH_NOSE = "covers_mouth_nose"
     COVERS_BODY = "covers_body"
     NEAR_BODY = "near_body"
     UNKNOWN = "unknown"
@@ -105,14 +107,57 @@ class InfantObservation(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     infant_box: BoundingBox
-    face_box: BoundingBox | None = None
+    mouth_nose_box: BoundingBox | None = Field(
+        description="Directly located or cautiously geometry-estimated combined mouth-and-nose region.",
+    )
     posture: Posture
-    face_visibility: FaceVisibility
+    mouth_nose_occlusion: MouthNoseOcclusion = Field(
+        description="Whether a visible object spatially covers the combined mouth-and-nose region."
+    )
     blanket_coverage: BlanketCoverage
     related_objects: list[RelatedObject] = Field(max_length=8)
     risk_level: RiskLevel
     confidence: float = Field(ge=0, le=1)
     evidence: list[str] = Field(max_length=3)
+
+    @model_validator(mode="after")
+    def validate_mouth_nose_grounding(self) -> "InfantObservation":
+        grounded_states = {
+            MouthNoseOcclusion.CLEAR,
+            MouthNoseOcclusion.PARTIALLY_COVERED,
+            MouthNoseOcclusion.FULLY_COVERED,
+        }
+        if self.mouth_nose_occlusion in grounded_states and self.mouth_nose_box is None:
+            raise ValueError(
+                "mouth_nose_box is required for clear, partially_covered, or fully_covered assessments"
+            )
+        mouth_nose_box = self.mouth_nose_box.root if self.mouth_nose_box is not None else None
+
+        def spatially_overlaps_mouth_nose(item: RelatedObject) -> bool:
+            if mouth_nose_box is None:
+                return False
+            mouth_ymin, mouth_xmin, mouth_ymax, mouth_xmax = mouth_nose_box
+            object_ymin, object_xmin, object_ymax, object_xmax = item.box.root
+            return max(mouth_ymin, object_ymin) < min(mouth_ymax, object_ymax) and max(
+                mouth_xmin, object_xmin
+            ) < min(mouth_xmax, object_xmax)
+
+        overlapping_relations = {
+            item.relation for item in self.related_objects if spatially_overlaps_mouth_nose(item)
+        }
+        if (
+            self.mouth_nose_occlusion is MouthNoseOcclusion.PARTIALLY_COVERED
+            and not overlapping_relations.intersection(
+                {ObjectRelation.PARTIALLY_COVERS_MOUTH_NOSE, ObjectRelation.COVERS_MOUTH_NOSE}
+            )
+        ):
+            raise ValueError("partially_covered requires a grounded related object spatially overlapping mouth/nose")
+        if (
+            self.mouth_nose_occlusion is MouthNoseOcclusion.FULLY_COVERED
+            and ObjectRelation.COVERS_MOUTH_NOSE not in overlapping_relations
+        ):
+            raise ValueError("fully_covered requires a grounded related object spatially covering mouth/nose")
+        return self
 
 
 class CatObservation(BaseModel):
@@ -135,7 +180,7 @@ class AdultObservation(BaseModel):
 class FrameAnalysis(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
-    schema_version: Literal["1.2"]
+    schema_version: Literal["1.3"]
     summary: str = Field(max_length=500)
     image_quality: ImageQuality
     infants: list[InfantObservation] = Field(max_length=64)
@@ -189,6 +234,7 @@ class AnalysisAttempt(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     attempt: int = Field(ge=1)
+    prompt: str
     outcome: Literal["success", "validation_error", "provider_error", "cancelled"]
     error_type: str | None = None
     error: str | None = None
