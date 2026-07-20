@@ -86,10 +86,11 @@ Verify runtime behavior:
 Docker/UI smoke:
 
 1. Start the release-candidate image on a disposable port.
-2. Verify `/`, `/docs`, `/api/providers`, `/api/monitor/status`, `/api/prompt`, and WebSocket connection.
+2. Verify `/`, `/docs`, `/api/providers`, `/api/monitor/status`, `/api/prompt`, WebSocket connection, idle heartbeat, and disconnect cleanup.
 3. Start a safe synthetic/local RTSP source with a mock or explicitly authorized model.
-4. Confirm exact-frame overlay, separate live preview, history image/detail, JSON highlighting, token totals, and stop/restart.
-5. Confirm slow inference increases dropped count rather than queue latency.
+4. Stall the RTSP source without clean EOF and verify the complete-frame watchdog terminates FFmpeg, publishes reconnect status, and recovers through bounded backoff.
+5. Confirm exact-frame overlay, separate live preview, history image/detail, JSON highlighting, token totals, and stop/restart.
+6. Confirm slow inference increases dropped count rather than queue latency.
 
 Real-provider contract smoke is opt-in. Record provider/model/version, prompt version, schema version, whether frames left the machine, latency, token fields, and result. Never commit captured frames or raw household data.
 

@@ -4,6 +4,8 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [0.2.1] - 2026-07-21
+
 ### Added
 
 - Added conservative adult-presence analysis with `present | not_detected | unknown` state, per-adult grounding boxes, confidence, and visible evidence.
@@ -23,6 +25,21 @@ All notable changes to this project are documented here. The format follows Keep
 - Made `mouth_nose_box` a required structured-output key whose value remains nullable, preventing providers from omitting it and then failing cross-field occlusion validation.
 - Avoided a second inference for the deterministic `infants=[]` plus non-`unknown` risk conflict by applying an explicit audited repair while preserving the raw provider response.
 - Unified all environment-backed settings to read defaults at `Settings()` construction time and added startup validation for history-budget and model-timeout lower bounds.
+- Replaced the untyped public monitor-state dictionary with an assignment-validated Pydantic contract shared by HTTP and WebSocket status serialization.
+- Added direct backend-to-TypeScript enum/interface synchronization tests and compile-time complete UI label coverage, including body-related object relations.
+- Replaced field-name-based Qwen box conversion with recursive Pydantic-annotation-driven normalization plus an independently discovered JSON Schema box-path guard.
+- Added layered RTSP stall recovery with FFmpeg network I/O timeouts and a low-FPS-aware complete-JPEG watchdog that forces half-open streams into the existing reconnect loop.
+- Added explicit production WebSocket protocol ping settings, concurrent application disconnect observation, idle JSON heartbeats, bounded sends, and guarded frontend event parsing.
+
+### Release metadata
+
+- Application version: `0.2.1`.
+- Prompt version: `baby-monitor-single-frame-v8-mouth-nose-occlusion`.
+- Analysis schema version: `1.3`.
+
+### Known limitations
+
+- Experimental, human-reviewed demo only; no medical, life-safety, unattended-monitoring, authentication, persistence, multi-camera, temporal reasoning, or external alerting guarantees.
 
 ## [0.2.0] - 2026-07-19
 

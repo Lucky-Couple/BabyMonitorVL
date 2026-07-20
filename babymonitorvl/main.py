@@ -18,7 +18,56 @@ from .monitor import MonitorService, redact_sensitive_text
 from .prompt import PROMPT_VERSION, build_prompt, output_schema
 from .providers import GeminiBackend, OllamaBackend
 from .providers.base import ProviderHealth
-from .schemas import GeminiKeyRequest, MonitorStartRequest, ProviderName
+from .schemas import GeminiKeyRequest, MonitorStartRequest, MonitorStatus, ProviderName
+
+
+WEBSOCKET_HEARTBEAT_SECONDS = 15.0
+WEBSOCKET_SEND_TIMEOUT_SECONDS = 5.0
+
+
+async def _wait_for_websocket_disconnect(websocket: WebSocket) -> None:
+    while True:
+        message = await websocket.receive()
+        if message["type"] == "websocket.disconnect":
+            return
+
+
+async def relay_websocket_events(
+    websocket: WebSocket,
+    queue: asyncio.Queue[dict[str, Any]],
+    initial_event: dict[str, Any],
+    *,
+    heartbeat_seconds: float = WEBSOCKET_HEARTBEAT_SECONDS,
+    send_timeout_seconds: float = WEBSOCKET_SEND_TIMEOUT_SECONDS,
+) -> None:
+    """Relay events while actively detecting disconnects and bounded send stalls."""
+
+    async def send(event: dict[str, Any]) -> None:
+        await asyncio.wait_for(websocket.send_json(event), timeout=send_timeout_seconds)
+
+    await send(initial_event)
+    event_task = asyncio.create_task(queue.get())
+    disconnect_task = asyncio.create_task(_wait_for_websocket_disconnect(websocket))
+    try:
+        while True:
+            done, _ = await asyncio.wait(
+                {event_task, disconnect_task},
+                timeout=heartbeat_seconds,
+                return_when=asyncio.FIRST_COMPLETED,
+            )
+            if disconnect_task in done:
+                disconnect_task.result()
+                return
+            if event_task in done:
+                event = event_task.result()
+                event_task = asyncio.create_task(queue.get())
+                await send(event)
+            else:
+                await send({"type": "heartbeat", "data": {}})
+    finally:
+        event_task.cancel()
+        disconnect_task.cancel()
+        await asyncio.gather(event_task, disconnect_task, return_exceptions=True)
 
 
 def create_app(settings: Settings | None = None) -> FastAPI:
@@ -146,7 +195,7 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await monitor.stop()
         return {"stopped": True}
 
-    @app.get("/api/monitor/status")
+    @app.get("/api/monitor/status", response_model=MonitorStatus)
     async def monitor_status() -> dict[str, Any]:
         return await monitor.status()
 
@@ -207,11 +256,12 @@ def create_app(settings: Settings | None = None) -> FastAPI:
         await websocket.accept()
         queue = await events.subscribe()
         try:
-            await websocket.send_json({"type": "status", "data": await monitor.status()})
-            while True:
-                event = await queue.get()
-                await websocket.send_json(event)
-        except WebSocketDisconnect:
+            await relay_websocket_events(
+                websocket,
+                queue,
+                {"type": "status", "data": await monitor.status()},
+            )
+        except (WebSocketDisconnect, TimeoutError, RuntimeError, OSError):
             pass
         finally:
             await events.unsubscribe(queue)

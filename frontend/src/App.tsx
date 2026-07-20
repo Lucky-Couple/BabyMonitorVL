@@ -2,13 +2,20 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import hljs from "highlight.js/lib/core";
 import jsonLanguage from "highlight.js/lib/languages/json";
 import type {
+  BlanketCoverage,
   Box,
+  CatProximity,
   FrameAnalysis,
   HistoryDetail,
   HistorySummary,
+  ImageQuality,
   MonitorStatus,
+  MouthNoseOcclusion,
+  ObjectRelation,
+  Posture,
   ProviderInfo,
   ProviderName,
+  RelatedObjectKind,
   Risk,
 } from "./types";
 
@@ -32,7 +39,67 @@ function writeRtspDraft(value: string) {
   }
 }
 
-const labels: Record<string, string> = {
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function isNullableString(value: unknown): value is string | null {
+  return value === null || typeof value === "string";
+}
+
+function isNullableNumber(value: unknown): value is number | null {
+  return value === null || (typeof value === "number" && Number.isFinite(value));
+}
+
+function isNonNegativeNumber(value: unknown): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value >= 0;
+}
+
+function isMonitorStatus(value: unknown): value is MonitorStatus {
+  if (!isRecord(value) || !isRecord(value.history)) return false;
+  const history = value.history;
+  const states = ["stopped", "connecting", "streaming", "reconnecting"];
+  const nullableStrings = [
+    "session_id",
+    "source",
+    "model",
+    "last_capture_at",
+    "last_analysis_at",
+    "last_record_id",
+    "last_error",
+  ];
+  const counters = [
+    "capture_count",
+    "submitted_count",
+    "completed_count",
+    "error_count",
+    "dropped_count",
+    "reconnect_attempt",
+    "input_tokens",
+    "output_tokens",
+  ];
+  return typeof value.state === "string"
+    && states.includes(value.state)
+    && (value.provider === null || value.provider === "ollama" || value.provider === "gemini")
+    && nullableStrings.every((name) => isNullableString(value[name]))
+    && isNullableNumber(value.fps)
+    && isNullableNumber(value.last_latency_ms)
+    && isNullableNumber(value.reconnect_delay_seconds)
+    && counters.every((name) => isNonNegativeNumber(value[name]))
+    && ["items", "bytes", "max_bytes"].every((name) => isNonNegativeNumber(history[name]));
+}
+
+type DisplayLabelKey =
+  | Risk
+  | ImageQuality
+  | Posture
+  | MouthNoseOcclusion
+  | BlanketCoverage
+  | RelatedObjectKind
+  | ObjectRelation
+  | CatProximity;
+
+const labels: Record<DisplayLabelKey, string> = {
   supine: "仰卧",
   prone: "俯卧",
   side_lying: "侧卧",
@@ -50,6 +117,8 @@ const labels: Record<string, string> = {
   covering_mouth_nose: "覆盖口鼻",
   partially_covers_mouth_nose: "部分覆盖口鼻",
   covers_mouth_nose: "覆盖口鼻",
+  covers_body: "覆盖身体",
+  near_body: "靠近身体",
   unknown: "未知",
   normal: "正常",
   watch: "需关注",
@@ -474,10 +543,23 @@ export default function App() {
       const protocol = location.protocol === "https:" ? "wss" : "ws";
       socket = new WebSocket(`${protocol}://${location.host}/api/events`);
       socket.onmessage = (message) => {
-        const event = JSON.parse(message.data);
-        if (event.type === "status") setStatus(event.data);
-        if (event.type === "capture") setLiveUrl(`${event.data.image_url}&t=${Date.now()}`);
-        if (event.type === "analysis_completed" || event.type === "analysis_failed") {
+        let event: unknown;
+        try {
+          event = typeof message.data === "string" ? JSON.parse(message.data) : null;
+        } catch {
+          return;
+        }
+        if (!isRecord(event) || typeof event.type !== "string") return;
+        if (event.type === "heartbeat") return;
+        if (event.type === "status" && isMonitorStatus(event.data)) setStatus(event.data);
+        if (event.type === "capture" && isRecord(event.data) && typeof event.data.image_url === "string") {
+          setLiveUrl(`${event.data.image_url}&t=${Date.now()}`);
+        }
+        if (
+          (event.type === "analysis_completed" || event.type === "analysis_failed")
+          && isRecord(event.data)
+          && typeof event.data.id === "string"
+        ) {
           void fetchHistory(event.data.id);
         }
       };

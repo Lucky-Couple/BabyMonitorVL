@@ -212,6 +212,42 @@ class GeminiKeyRequest(BaseModel):
     api_key: SecretStr = Field(min_length=1, max_length=4096)
 
 
+class HistoryStats(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    items: int = Field(default=0, ge=0)
+    bytes: int = Field(default=0, ge=0)
+    max_bytes: int = Field(default=0, ge=0)
+
+
+class MonitorStatus(BaseModel):
+    """Runtime and public monitor status with assignment-time validation."""
+
+    model_config = ConfigDict(extra="forbid", validate_assignment=True)
+
+    state: Literal["stopped", "connecting", "streaming", "reconnecting"] = "stopped"
+    session_id: str | None = None
+    source: str | None = None
+    provider: Literal["ollama", "gemini"] | None = None
+    model: str | None = None
+    fps: float | None = None
+    capture_count: int = Field(default=0, ge=0)
+    submitted_count: int = Field(default=0, ge=0)
+    completed_count: int = Field(default=0, ge=0)
+    error_count: int = Field(default=0, ge=0)
+    dropped_count: int = Field(default=0, ge=0)
+    last_capture_at: str | None = None
+    last_analysis_at: str | None = None
+    last_latency_ms: float | None = Field(default=None, ge=0)
+    last_record_id: str | None = None
+    last_error: str | None = None
+    reconnect_attempt: int = Field(default=0, ge=0)
+    reconnect_delay_seconds: int | None = Field(default=None, ge=0)
+    input_tokens: int = Field(default=0, ge=0)
+    output_tokens: int = Field(default=0, ge=0)
+    history: HistoryStats = Field(default_factory=HistoryStats)
+
+
 class MonitorStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 

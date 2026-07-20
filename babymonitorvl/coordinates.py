@@ -3,9 +3,12 @@ from __future__ import annotations
 import copy
 import json
 from enum import Enum
-from typing import Any
+from types import UnionType
+from typing import Annotated, Any, Union, get_args, get_origin
 
-from .schemas import FrameAnalysis, ProviderName
+from pydantic import BaseModel
+
+from .schemas import BoundingBox, FrameAnalysis, ProviderName
 
 
 class BoxCoordinateOrder(str, Enum):
@@ -56,43 +59,84 @@ def schema_for_box_order(schema: dict[str, Any], order: BoxCoordinateOrder) -> d
     return result
 
 
+def _normalize_box(box: Any) -> Any:
+    if isinstance(box, list) and len(box) == 4:
+        xmin, ymin, xmax, ymax = box
+        return [ymin, xmin, ymax, xmax]
+    return box
+
+
+def _is_model_type(annotation: Any) -> bool:
+    return isinstance(annotation, type) and issubclass(annotation, BaseModel)
+
+
+def _annotation_contains_box(
+    annotation: Any,
+    seen: frozenset[type[BaseModel]] = frozenset(),
+) -> bool:
+    if annotation is BoundingBox:
+        return True
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is Annotated:
+        return bool(arguments) and _annotation_contains_box(arguments[0], seen)
+    if origin in (list, tuple, set, frozenset, Union, UnionType):
+        return any(_annotation_contains_box(item, seen) for item in arguments)
+    if origin is dict and len(arguments) == 2:
+        return _annotation_contains_box(arguments[1], seen)
+    if _is_model_type(annotation):
+        if annotation in seen:
+            return False
+        next_seen = seen | {annotation}
+        return any(
+            _annotation_contains_box(field.annotation, next_seen)
+            for field in annotation.model_fields.values()
+        )
+    return False
+
+
+def _normalize_typed_value(value: Any, annotation: Any) -> Any:
+    if annotation is BoundingBox:
+        return _normalize_box(value)
+
+    origin = get_origin(annotation)
+    arguments = get_args(annotation)
+    if origin is Annotated and arguments:
+        return _normalize_typed_value(value, arguments[0])
+    if origin in (list, tuple, set, frozenset) and arguments and isinstance(value, list):
+        return [_normalize_typed_value(item, arguments[0]) for item in value]
+    if origin is dict and len(arguments) == 2 and isinstance(value, dict):
+        return {
+            key: _normalize_typed_value(item, arguments[1])
+            for key, item in value.items()
+        }
+    if origin in (Union, UnionType):
+        for option in arguments:
+            if _annotation_contains_box(option):
+                return _normalize_typed_value(value, option)
+        return value
+    if _is_model_type(annotation) and isinstance(value, dict):
+        return _normalize_model_payload(value, annotation)
+    return value
+
+
+def _normalize_model_payload(
+    payload: dict[str, Any], model_type: type[BaseModel]
+) -> dict[str, Any]:
+    result = dict(payload)
+    for name, field in model_type.model_fields.items():
+        if name in result and _annotation_contains_box(field.annotation):
+            result[name] = _normalize_typed_value(result[name], field.annotation)
+    return result
+
+
 def normalize_analysis_payload(payload: dict[str, Any], order: BoxCoordinateOrder) -> dict[str, Any]:
-    """Convert every model box to the API/UI canonical YXYX order."""
+    """Convert every schema-declared model box to the API/UI canonical YXYX order."""
 
     result = copy.deepcopy(payload)
     if order is CANONICAL_BOX_ORDER:
         return result
-
-    def normalize_box(box: Any) -> Any:
-        if isinstance(box, list) and len(box) == 4:
-            xmin, ymin, xmax, ymax = box
-            return [ymin, xmin, ymax, xmax]
-        return box
-
-    infants = result.get("infants")
-    if isinstance(infants, list):
-        for infant in infants:
-            if not isinstance(infant, dict):
-                continue
-            infant["infant_box"] = normalize_box(infant.get("infant_box"))
-            if infant.get("mouth_nose_box") is not None:
-                infant["mouth_nose_box"] = normalize_box(infant.get("mouth_nose_box"))
-            related_objects = infant.get("related_objects")
-            if isinstance(related_objects, list):
-                for related_object in related_objects:
-                    if isinstance(related_object, dict):
-                        related_object["box"] = normalize_box(related_object.get("box"))
-    adults = result.get("adults")
-    if isinstance(adults, list):
-        for adult in adults:
-            if isinstance(adult, dict):
-                adult["adult_box"] = normalize_box(adult.get("adult_box"))
-    cats = result.get("cats")
-    if isinstance(cats, list):
-        for cat in cats:
-            if isinstance(cat, dict):
-                cat["cat_box"] = normalize_box(cat.get("cat_box"))
-    return result
+    return _normalize_model_payload(result, FrameAnalysis)
 
 
 def parse_model_analysis(raw_response: str, order: BoxCoordinateOrder) -> FrameAnalysis:

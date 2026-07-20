@@ -2,10 +2,13 @@ import json
 import re
 import tomllib
 from pathlib import Path
+from typing import get_args
 
 from babymonitorvl import __version__
 from babymonitorvl.config import Settings
 from babymonitorvl.main import create_app
+from babymonitorvl.prompt import PROMPT_VERSION
+from babymonitorvl.schemas import FrameAnalysis
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -28,6 +31,18 @@ def test_application_versions_stay_in_sync(tmp_path) -> None:
     assert project["license"] == "MIT"
     assert (ROOT / "LICENSE").read_text(encoding="utf-8").startswith("MIT License\n")
     assert create_app(Settings(frontend_dist=tmp_path, gemini_api_key=None)).version == __version__
+
+
+def test_changelog_records_current_release_contract() -> None:
+    changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    current_release = changelog.split(f"## [{__version__}]", maxsplit=1)[1].split(
+        "\n## [", maxsplit=1
+    )[0]
+    schema_versions = get_args(FrameAnalysis.model_fields["schema_version"].annotation)
+    assert len(schema_versions) == 1
+    assert f"Application version: `{__version__}`." in current_release
+    assert f"Prompt version: `{PROMPT_VERSION}`." in current_release
+    assert f"Analysis schema version: `{schema_versions[0]}`." in current_release
 
 
 def test_frontend_release_dependencies_do_not_use_latest() -> None:
@@ -53,6 +68,7 @@ def test_docker_context_excludes_local_caches_tests_and_docs() -> None:
         ".venv",
         ".pytest_cache",
         ".ruff_cache",
+        ".rpiv",
         "frontend/node_modules",
         "frontend/dist",
         "frontend/.pnpm-store",
@@ -60,6 +76,12 @@ def test_docker_context_excludes_local_caches_tests_and_docs() -> None:
         "docs",
         ".env",
     } <= entries
+
+
+def test_production_server_has_explicit_websocket_ping_policy() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert '"--ws-ping-interval", "20"' in dockerfile
+    assert '"--ws-ping-timeout", "20"' in dockerfile
 
 
 def test_relative_markdown_links_resolve() -> None:

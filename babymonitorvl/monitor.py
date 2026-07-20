@@ -31,7 +31,14 @@ from .history import HistoryRecord, HistoryStore
 from .prompt import PROMPT_VERSION, build_prompt, output_schema
 from .providers import AnalysisRequest, VisionBackend
 from .providers.base import aggregate_usage, should_retry_provider_error, token_count
-from .schemas import AnalysisAttempt, FrameAnalysis, MonitorStartRequest, ProviderName
+from .schemas import (
+    AnalysisAttempt,
+    FrameAnalysis,
+    HistoryStats,
+    MonitorStartRequest,
+    MonitorStatus,
+    ProviderName,
+)
 
 
 logger = logging.getLogger(__name__)
@@ -134,32 +141,11 @@ class MonitorService:
         self._config: MonitorStartRequest | None = None
         self._model: str | None = None
         self._latest_capture: CapturedFrame | None = None
-        self._state: dict[str, Any] = self._new_state()
+        self._status = self._new_status()
 
     @staticmethod
-    def _new_state() -> dict[str, Any]:
-        return {
-            "state": "stopped",
-            "session_id": None,
-            "source": None,
-            "provider": None,
-            "model": None,
-            "fps": None,
-            "capture_count": 0,
-            "submitted_count": 0,
-            "completed_count": 0,
-            "error_count": 0,
-            "dropped_count": 0,
-            "last_capture_at": None,
-            "last_analysis_at": None,
-            "last_latency_ms": None,
-            "last_record_id": None,
-            "last_error": None,
-            "reconnect_attempt": 0,
-            "reconnect_delay_seconds": None,
-            "input_tokens": 0,
-            "output_tokens": 0,
-        }
+    def _new_status() -> MonitorStatus:
+        return MonitorStatus()
 
     def _default_model(self, provider: ProviderName) -> str:
         if provider is ProviderName.OLLAMA:
@@ -194,17 +180,13 @@ class MonitorService:
             self._model = model
             self._queue = asyncio.Queue(maxsize=1)
             self._latest_capture = None
-            self._state = self._new_state()
-            self._state.update(
-                {
-                    "state": "connecting",
-                    "session_id": session_id,
-                    "source": redact_url(config.rtsp_url),
-                    "provider": config.provider.value,
-                    "model": model,
-                    "fps": config.fps,
-                }
-            )
+            self._status = self._new_status()
+            self._status.state = "connecting"
+            self._status.session_id = session_id
+            self._status.source = redact_url(config.rtsp_url)
+            self._status.provider = config.provider.value
+            self._status.model = model
+            self._status.fps = config.fps
             self._capture_task = asyncio.create_task(self._capture_loop(session_id), name="rtsp-capture")
             self._analysis_task = asyncio.create_task(self._analysis_loop(session_id), name="frame-analysis")
         await self._publish_status()
@@ -244,10 +226,10 @@ class MonitorService:
         async with self._lock:
             self._config = None
             self._model = None
-            self._state["state"] = "stopped"
-            self._state["session_id"] = None
-            self._state["reconnect_attempt"] = 0
-            self._state["reconnect_delay_seconds"] = None
+            self._status.state = "stopped"
+            self._status.session_id = None
+            self._status.reconnect_attempt = 0
+            self._status.reconnect_delay_seconds = None
         await self._publish_status()
 
     async def close(self) -> None:
@@ -255,9 +237,8 @@ class MonitorService:
         await asyncio.gather(*(provider.close() for provider in self.providers.values()), return_exceptions=True)
 
     async def status(self) -> dict[str, Any]:
-        state = dict(self._state)
-        state["history"] = await self.history.stats()
-        return state
+        self._status.history = HistoryStats.model_validate(await self.history.stats())
+        return self._status.model_dump(mode="json")
 
     async def latest_image(self) -> CapturedFrame | None:
         return self._latest_capture
@@ -273,12 +254,8 @@ class MonitorService:
         sequence = 0
         try:
             while self._session_id == session_id:
-                self._state.update(
-                    {
-                        "state": "connecting" if reconnect_attempt == 0 else "reconnecting",
-                        "reconnect_delay_seconds": None,
-                    }
-                )
+                self._status.state = "connecting" if reconnect_attempt == 0 else "reconnecting"
+                self._status.reconnect_delay_seconds = None
                 await self._publish_status()
                 command = build_ffmpeg_command(
                     self.settings.ffmpeg_binary,
@@ -286,6 +263,7 @@ class MonitorService:
                     config.fps,
                     config.rtsp_transport,
                     config.max_image_edge,
+                    self.settings.rtsp_stall_timeout_seconds,
                 )
                 stderr_lines: list[str] = []
                 process: asyncio.subprocess.Process | None = None
@@ -299,31 +277,32 @@ class MonitorService:
                     self._process = process
                     assert process.stdout is not None and process.stderr is not None
                     stderr_task = asyncio.create_task(collect_stderr(process.stderr, stderr_lines))
-                    async for image_bytes in read_mjpeg_frames(process.stdout):
+                    frame_timeout = max(
+                        self.settings.rtsp_stall_timeout_seconds,
+                        3.0 / config.fps,
+                    )
+                    async for image_bytes in read_mjpeg_frames(process.stdout, frame_timeout):
                         if self._session_id != session_id:
                             break
                         try:
                             width, height = jpeg_dimensions(image_bytes)
                         except ValueError as exc:
-                            self._state["last_error"] = str(exc)
+                            self._status.last_error = str(exc)
                             continue
                         sequence += 1
                         captured_at = utc_now()
                         frame = CapturedFrame(image_bytes, captured_at, width, height, sequence)
                         self._latest_capture = frame
-                        self._state.update(
-                            {
-                                "state": "streaming",
-                                "capture_count": sequence,
-                                "last_capture_at": captured_at.isoformat(),
-                                "reconnect_attempt": 0,
-                                "reconnect_delay_seconds": None,
-                            }
-                        )
+                        self._status.state = "streaming"
+                        self._status.capture_count = sequence
+                        self._status.last_capture_at = captured_at.isoformat()
+                        self._status.reconnect_attempt = 0
+                        self._status.reconnect_delay_seconds = None
+                        self._status.last_error = None
                         reconnect_delay = 1
                         reconnect_attempt = 0
                         if offer_latest(self._queue, frame):
-                            self._state["dropped_count"] += 1
+                            self._status.dropped_count += 1
                         await self.events.publish(
                             {
                                 "type": "capture",
@@ -356,14 +335,10 @@ class MonitorService:
                 message = " | ".join(filter(None, stderr_lines[-3:])) or "FFmpeg stream ended"
                 message = message.replace(config.rtsp_url, redact_url(config.rtsp_url))
                 reconnect_attempt += 1
-                self._state.update(
-                    {
-                        "state": "reconnecting",
-                        "last_error": message,
-                        "reconnect_attempt": reconnect_attempt,
-                        "reconnect_delay_seconds": reconnect_delay,
-                    }
-                )
+                self._status.state = "reconnecting"
+                self._status.last_error = message
+                self._status.reconnect_attempt = reconnect_attempt
+                self._status.reconnect_delay_seconds = reconnect_delay
                 await self._publish_status()
                 await asyncio.sleep(reconnect_delay)
                 reconnect_delay = min(reconnect_delay * 2, 30)
@@ -410,7 +385,7 @@ class MonitorService:
                 generation_params=generation_params,
             )
             await self.history.add(record)
-            self._state["submitted_count"] += 1
+            self._status.submitted_count += 1
             await self.events.publish(
                 {"type": "analysis_started", "data": {"id": record.id, "captured_at": frame.captured_at.isoformat()}}
             )
@@ -447,8 +422,8 @@ class MonitorService:
                         attempt_usage = dict(result.usage)
                         attempt_usages.append(result.usage)
                         usage = aggregate_usage(attempt_usages)
-                        self._state["input_tokens"] += token_count(result.usage, "input_tokens")
-                        self._state["output_tokens"] += token_count(result.usage, "output_tokens")
+                        self._status.input_tokens += token_count(result.usage, "input_tokens")
+                        self._status.output_tokens += token_count(result.usage, "output_tokens")
                         try:
                             candidate, contract_warnings = parse_model_analysis_with_repairs(
                                 result.raw_response,
@@ -555,15 +530,11 @@ class MonitorService:
                         attempts=attempts,
                         usage=usage,
                     )
-                    self._state.update(
-                        {
-                            "completed_count": self._state["completed_count"] + 1,
-                            "last_analysis_at": utc_now().isoformat(),
-                            "last_latency_ms": round(latency_ms, 1),
-                            "last_record_id": record.id,
-                            "last_error": None,
-                        }
-                    )
+                    self._status.completed_count += 1
+                    self._status.last_analysis_at = utc_now().isoformat()
+                    self._status.last_latency_ms = round(latency_ms, 1)
+                    self._status.last_record_id = record.id
+                    self._status.last_error = None
                     await self.events.publish(
                         {
                             "type": "analysis_completed",
@@ -583,15 +554,11 @@ class MonitorService:
                         attempts=attempts,
                         usage=usage,
                     )
-                    self._state.update(
-                        {
-                            "error_count": self._state["error_count"] + 1,
-                            "last_analysis_at": utc_now().isoformat(),
-                            "last_latency_ms": round(latency_ms, 1),
-                            "last_record_id": record.id,
-                            "last_error": errors[-1] if errors else "model analysis failed",
-                        }
-                    )
+                    self._status.error_count += 1
+                    self._status.last_analysis_at = utc_now().isoformat()
+                    self._status.last_latency_ms = round(latency_ms, 1)
+                    self._status.last_record_id = record.id
+                    self._status.last_error = errors[-1] if errors else "model analysis failed"
                     await self.events.publish(
                         {
                             "type": "analysis_failed",

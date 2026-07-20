@@ -12,6 +12,7 @@ def test_environment_backed_defaults_are_read_when_settings_is_instantiated(
     monkeypatch.setenv("DEFAULT_OLLAMA_MODEL", "first-ollama-model")
     monkeypatch.setenv("DEFAULT_GEMINI_MODEL", "first-gemini-model")
     monkeypatch.setenv("MODEL_TIMEOUT_SECONDS", "12.5")
+    monkeypatch.setenv("RTSP_STALL_TIMEOUT_SECONDS", "18.5")
     monkeypatch.setenv("HISTORY_MAX_BYTES", "4096")
     monkeypatch.setenv("MAX_INFANTS", "2")
     monkeypatch.setenv("MAX_ADULTS", "6")
@@ -24,6 +25,7 @@ def test_environment_backed_defaults_are_read_when_settings_is_instantiated(
     assert first.default_ollama_model == "first-ollama-model"
     assert first.default_gemini_model == "first-gemini-model"
     assert first.model_timeout_seconds == 12.5
+    assert first.rtsp_stall_timeout_seconds == 18.5
     assert first.history_max_bytes == 4096
     assert first.max_infants == 2
     assert first.max_adults == 6
@@ -76,5 +78,16 @@ def test_model_timeout_rejects_non_positive_or_non_finite_values(
     monkeypatch.setenv("MODEL_TIMEOUT_SECONDS", value)
     with pytest.raises(
         ValueError, match="MODEL_TIMEOUT_SECONDS must be a finite number greater than 0"
+    ):
+        Settings(frontend_dist=tmp_path)
+
+
+@pytest.mark.parametrize("value", ["0", "-1", "nan", "inf"])
+def test_rtsp_stall_timeout_rejects_non_positive_or_non_finite_values(
+    monkeypatch, tmp_path, value: str
+) -> None:
+    monkeypatch.setenv("RTSP_STALL_TIMEOUT_SECONDS", value)
+    with pytest.raises(
+        ValueError, match="RTSP_STALL_TIMEOUT_SECONDS must be a finite number greater than 0"
     ):
         Settings(frontend_dist=tmp_path)

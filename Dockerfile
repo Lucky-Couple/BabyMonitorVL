@@ -23,4 +23,4 @@ COPY babymonitorvl/ ./babymonitorvl/
 RUN uv sync --frozen --no-dev
 COPY --from=frontend-build /build/frontend/dist ./frontend/dist
 EXPOSE 8000
-CMD ["uvicorn", "babymonitorvl.main:app", "--host", "0.0.0.0", "--port", "8000"]
+CMD ["uvicorn", "babymonitorvl.main:app", "--host", "0.0.0.0", "--port", "8000", "--ws-ping-interval", "20", "--ws-ping-timeout", "20"]

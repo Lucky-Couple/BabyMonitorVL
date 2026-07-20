@@ -3,10 +3,13 @@ import json
 from datetime import timezone
 
 import pytest
+from pydantic import ValidationError
 
+import babymonitorvl.monitor as monitor_module
 from babymonitorvl.config import Settings
 from babymonitorvl.coordinates import ModelOutputError
 from babymonitorvl.events import EventHub
+from babymonitorvl.ffmpeg import FrameReadTimeout
 from babymonitorvl.history import HistoryStore
 from babymonitorvl.monitor import (
     CapturedFrame,
@@ -26,7 +29,7 @@ from babymonitorvl.providers.base import (
     aggregate_usage,
     should_retry_provider_error,
 )
-from babymonitorvl.schemas import MonitorStartRequest, ProviderName
+from babymonitorvl.schemas import MonitorStartRequest, MonitorStatus, ProviderName
 
 
 def frame(sequence: int) -> CapturedFrame:
@@ -38,6 +41,79 @@ def test_latest_frame_queue_replaces_stale_frame() -> None:
     assert offer_latest(queue, frame(1)) is False
     assert offer_latest(queue, frame(2)) is True
     assert queue.get_nowait().sequence == 2
+
+
+def test_monitor_status_rejects_unknown_fields_and_invalid_assignments() -> None:
+    status = MonitorStatus()
+    with pytest.raises(ValidationError, match="no_such_attribute"):
+        setattr(status, "reconect_delay_seconds", 1)
+    with pytest.raises(ValidationError, match="greater than or equal to 0"):
+        status.capture_count = -1
+
+
+class StalledFFmpegProcess:
+    def __init__(self) -> None:
+        self.stdout = asyncio.StreamReader()
+        self.stderr = asyncio.StreamReader()
+        self.stderr.feed_eof()
+        self.returncode: int | None = None
+        self.terminated = False
+
+    async def wait(self) -> int:
+        while self.returncode is None:
+            await asyncio.sleep(0)
+        return self.returncode
+
+    def terminate(self) -> None:
+        self.terminated = True
+        self.returncode = 0
+        self.stdout.feed_eof()
+
+    def kill(self) -> None:
+        self.returncode = -9
+        self.stdout.feed_eof()
+
+
+@pytest.mark.asyncio
+async def test_frame_stall_terminates_ffmpeg_and_enters_reconnect(monkeypatch, tmp_path) -> None:
+    process = StalledFFmpegProcess()
+
+    async def create_process(*args, **kwargs):
+        return process
+
+    async def stalled_frames(reader, frame_timeout_seconds):
+        raise FrameReadTimeout("FFmpeg produced no complete JPEG frame for 30 seconds")
+        yield b""  # pragma: no cover
+
+    monkeypatch.setattr(monitor_module.asyncio, "create_subprocess_exec", create_process)
+    monkeypatch.setattr(monitor_module, "read_mjpeg_frames", stalled_frames)
+    service = MonitorService(
+        Settings(frontend_dist=tmp_path, ffmpeg_binary="true"),
+        HistoryStore(1024 * 1024),
+        EventHub(),
+        {},
+    )
+    session_id = "stalled-capture-session"
+    service._session_id = session_id
+    service._config = MonitorStartRequest(
+        rtsp_url="rtsp://camera.invalid/stream",
+        provider=ProviderName.OLLAMA,
+    )
+    task = asyncio.create_task(service._capture_loop(session_id))
+
+    async def wait_for_reconnect() -> None:
+        while service._status.reconnect_attempt < 1:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_reconnect(), timeout=0.2)
+    assert process.terminated is True
+    assert service._status.state == "reconnecting"
+    assert service._status.reconnect_delay_seconds == 1
+    assert "no complete JPEG frame" in (service._status.last_error or "")
+
+    service._session_id = None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
 
 
 def test_rtsp_credentials_and_query_values_are_redacted() -> None:
@@ -213,7 +289,7 @@ async def test_analysis_retry_adds_json_validation_correction(tmp_path) -> None:
     task = asyncio.create_task(service._analysis_loop(session_id))
 
     async def wait_for_completion() -> None:
-        while service._state["completed_count"] < 1:
+        while service._status.completed_count < 1:
             await asyncio.sleep(0)
 
     await asyncio.wait_for(wait_for_completion(), timeout=1)
@@ -266,7 +342,7 @@ async def test_provider_json_error_retries_without_model_output_correction(tmp_p
     task = asyncio.create_task(service._analysis_loop(session_id))
 
     async def wait_for_completion() -> None:
-        while service._state["completed_count"] < 1:
+        while service._status.completed_count < 1:
             await asyncio.sleep(0)
 
     await asyncio.wait_for(wait_for_completion(), timeout=1)
@@ -312,7 +388,7 @@ async def test_empty_scene_normal_risk_is_audited_and_does_not_retry(tmp_path, c
     task = asyncio.create_task(service._analysis_loop(session_id))
 
     async def wait_for_completion() -> None:
-        while service._state["completed_count"] < 1:
+        while service._status.completed_count < 1:
             await asyncio.sleep(0)
 
     await asyncio.wait_for(wait_for_completion(), timeout=1)
@@ -357,7 +433,7 @@ async def test_duplicate_boxes_are_dropped_logged_and_audited(tmp_path, caplog) 
     task = asyncio.create_task(service._analysis_loop(session_id))
 
     async def wait_for_completion() -> None:
-        while service._state["completed_count"] < 1:
+        while service._status.completed_count < 1:
             await asyncio.sleep(0)
 
     await asyncio.wait_for(wait_for_completion(), timeout=1)

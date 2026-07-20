@@ -27,6 +27,8 @@ Subject limits default to `MAX_INFANTS=1` and `MAX_ADULTS=4`. Both values accept
 
 Every environment-backed `Settings` default is read when a `Settings()` instance is constructed, not when `babymonitorvl.config` is imported. Preserve that lifecycle for new settings and add a post-import monkeypatch regression test for every new environment variable. Constructing settings rejects non-positive `HISTORY_MAX_BYTES`, and `MODEL_TIMEOUT_SECONDS` must be both finite and greater than zero; configuration errors should fail at startup rather than produce an empty cache or invalid timeout behavior later.
 
+`RTSP_STALL_TIMEOUT_SECONDS` defaults to 30 seconds and must be a finite positive number. It configures FFmpeg socket I/O timeout and is the baseline for the complete-JPEG watchdog. The effective frame watchdog is `max(RTSP_STALL_TIMEOUT_SECONDS, 3 / fps)`, preventing false reconnects at low sampling rates. A reconnect test must prove watchdog expiry terminates the child process before the backoff state is published.
+
 For Gemini, either set `GEMINI_API_KEY` in the untracked `.env` or use the page's Gemini Key dialog. A dialog value is validated and kept only in backend process memory; it is not browser-persisted and disappears on restart. Because the MVP has no authentication, configure credentials only over the default loopback binding or trusted HTTPS. Selected frames leave the machine when Gemini is active.
 
 ## Native development
@@ -80,6 +82,8 @@ pnpm --dir frontend typecheck
 pnpm --dir frontend build
 ```
 
+`tests/test_contract_sync.py` directly compares backend enum values and public model fields with the committed TypeScript unions/interfaces. Frontend labels are typed as a complete `Record` over every displayed enum, so an added value must receive a deliberate UI label before `tsc` succeeds. Do not replace these checks with source-text presence tests or a snapshot that can pass while the frontend contract remains stale.
+
 ## Dependency changes
 
 Python:
@@ -117,6 +121,7 @@ Ollama smoke criteria:
 - Raw JSON matches the shared schema.
 - Overlay coordinates visually correspond to the exact submitted frame.
 - Token input/output counts are present when Ollama reports them.
+- Interrupt or stall a disposable RTSP source and confirm status reaches `reconnecting` without waiting for FFmpeg EOF, then returns to `streaming` after recovery.
 
 Gemini smoke criteria add explicit confirmation that sending the chosen frame to Google is acceptable. Test the exact selected model, inspect the actual serialized generation parameters, confirm that the portable baseline does not send an unsupported `thinking_level`, and verify the history schema profile is `google-ai-structured-output-compact-v1`. The returned JSON must pass `FrameAnalysis`, not merely complete the provider request. Any model-specific generation option or schema keyword must satisfy [Gemini/Gemma provider rules](GEMINI_PROVIDER.md). Never use a household camera for a release smoke test unless the owner has expressly authorized it.
 

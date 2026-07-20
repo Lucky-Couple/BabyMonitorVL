@@ -8,23 +8,33 @@ JPEG_START = b"\xff\xd8"
 JPEG_END = b"\xff\xd9"
 
 
+class FrameReadTimeout(TimeoutError):
+    """FFmpeg produced no complete JPEG frame within the watchdog interval."""
+
+
 def build_ffmpeg_command(
     binary: str,
     rtsp_url: str,
     fps: float,
     transport: str,
     max_image_edge: int,
+    io_timeout_seconds: float = 30.0,
 ) -> list[str]:
     scale = (
         f"scale=w='if(gt(iw,ih),min(iw,{max_image_edge}),-2)'"
         f":h='if(gt(iw,ih),-2,min(ih,{max_image_edge}))'"
     )
+    io_timeout_microseconds = max(1, int(io_timeout_seconds * 1_000_000))
     return [
         binary,
         "-hide_banner",
         "-loglevel",
         "warning",
         "-nostdin",
+        "-rw_timeout",
+        str(io_timeout_microseconds),
+        "-timeout",
+        str(io_timeout_microseconds),
         "-rtsp_transport",
         transport,
         "-i",
@@ -42,7 +52,7 @@ def build_ffmpeg_command(
     ]
 
 
-async def read_mjpeg_frames(reader: asyncio.StreamReader) -> AsyncIterator[bytes]:
+async def _read_mjpeg_frames_unbounded(reader: asyncio.StreamReader) -> AsyncIterator[bytes]:
     buffer = bytearray()
     while True:
         chunk = await reader.read(64 * 1024)
@@ -66,6 +76,28 @@ async def read_mjpeg_frames(reader: asyncio.StreamReader) -> AsyncIterator[bytes
             frame = bytes(buffer[start:end])
             del buffer[:end]
             yield frame
+
+
+async def read_mjpeg_frames(
+    reader: asyncio.StreamReader,
+    frame_timeout_seconds: float | None = None,
+) -> AsyncIterator[bytes]:
+    """Yield complete JPEGs and optionally fail when complete-frame output stalls."""
+
+    frames = _read_mjpeg_frames_unbounded(reader)
+    while True:
+        try:
+            if frame_timeout_seconds is None:
+                frame = await anext(frames)
+            else:
+                frame = await asyncio.wait_for(anext(frames), timeout=frame_timeout_seconds)
+        except StopAsyncIteration:
+            return
+        except TimeoutError as exc:
+            raise FrameReadTimeout(
+                f"FFmpeg produced no complete JPEG frame for {frame_timeout_seconds:g} seconds"
+            ) from exc
+        yield frame
 
 
 def jpeg_dimensions(data: bytes) -> tuple[int, int]:

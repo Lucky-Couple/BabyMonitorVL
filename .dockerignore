@@ -4,6 +4,7 @@
 __pycache__
 .pytest_cache
 .ruff_cache
+.rpiv
 .mypy_cache
 .coverage
 htmlcov

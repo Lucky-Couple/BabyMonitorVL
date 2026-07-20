@@ -1,6 +1,9 @@
 export type ProviderName = "ollama" | "gemini";
+export type MonitorState = "stopped" | "connecting" | "streaming" | "reconnecting";
 export type Risk = "normal" | "watch" | "alert" | "unknown";
 export type Box = [number, number, number, number];
+export type ImageQuality = "good" | "poor" | "unusable" | "unknown";
+export type Posture = "supine" | "prone" | "side_lying" | "not_lying" | "unknown";
 export type MouthNoseOcclusion = "clear" | "partially_covered" | "fully_covered" | "not_visible" | "unknown";
 export type BlanketCoverage =
   | "absent"
@@ -19,6 +22,7 @@ export type ObjectRelation =
   | "covers_body"
   | "near_body"
   | "unknown";
+export type CatProximity = "separate" | "near_infant" | "overlapping_infant" | "unknown";
 
 export interface ProviderInfo {
   available: boolean;
@@ -41,7 +45,7 @@ export interface RelatedObject {
 export interface InfantObservation {
   infant_box: Box;
   mouth_nose_box: Box | null;
-  posture: string;
+  posture: Posture;
   mouth_nose_occlusion: MouthNoseOcclusion;
   blanket_coverage: BlanketCoverage;
   related_objects: RelatedObject[];
@@ -52,7 +56,7 @@ export interface InfantObservation {
 
 export interface CatObservation {
   cat_box: Box;
-  proximity_to_infant: "separate" | "near_infant" | "overlapping_infant" | "unknown";
+  proximity_to_infant: CatProximity;
   confidence: number;
   evidence: string[];
 }
@@ -68,7 +72,7 @@ export interface AdultObservation {
 export interface FrameAnalysis {
   schema_version: "1.3";
   summary: string;
-  image_quality: string;
+  image_quality: ImageQuality;
   infants: InfantObservation[];
   adult_presence: AdultPresence;
   adults: AdultObservation[];
@@ -126,7 +130,7 @@ export interface HistoryDetail extends HistorySummary {
 }
 
 export interface MonitorStatus {
-  state: "stopped" | "connecting" | "streaming" | "reconnecting";
+  state: MonitorState;
   session_id: string | null;
   source: string | null;
   provider: ProviderName | null;
@@ -146,5 +150,11 @@ export interface MonitorStatus {
   reconnect_delay_seconds: number | null;
   input_tokens: number;
   output_tokens: number;
-  history: { items: number; bytes: number; max_bytes: number };
+  history: HistoryStats;
+}
+
+export interface HistoryStats {
+  items: number;
+  bytes: number;
+  max_bytes: number;
 }

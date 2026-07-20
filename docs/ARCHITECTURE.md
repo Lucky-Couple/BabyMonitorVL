@@ -38,7 +38,9 @@ The FFmpeg command uses argument arrays, never a shell. It applies `fps`, aspect
 
 For every sampled JPEG, capture updates the unannotated live image and offers the frame to the queue. If the queue is full, the queued frame is replaced. This preserves freshness when inference is slower than capture.
 
-If FFmpeg ends, capture publishes a redacted error and reconnects after 1, 2, 4, 8, 16, then at most 30 seconds. `reconnect_attempt` is the consecutive reconnect ordinal; `reconnect_delay_seconds` is populated only while waiting for the next attempt. Both reset after a valid frame or an explicit stop. Stopping a session cancels tasks and terminates, then kills if necessary, the subprocess.
+FFmpeg receives both the generic network `rw_timeout` and RTSP demuxer `timeout`, derived from `RTSP_STALL_TIMEOUT_SECONDS`. Independently, Python bounds the wait for the next complete JPEG to the greater of that setting or three configured frame intervals. This second watchdog also detects a live FFmpeg process that receives keepalives or partial bytes but stops producing decodable frames. Either EOF, I/O failure, or frame-watchdog expiry terminates the child, publishes a redacted error, and reconnects after 1, 2, 4, 8, 16, then at most 30 seconds. `reconnect_attempt` is the consecutive reconnect ordinal; `reconnect_delay_seconds` is populated only while waiting for the next attempt. Both and the previous error reset after a valid frame; explicit stop resets the reconnect fields. Stopping a session cancels tasks and terminates, then kills if necessary, the subprocess.
+
+Runtime status is held in the assignment-validated `MonitorStatus` Pydantic model and serialized unchanged for both `/api/monitor/status` and WebSocket status events. Unknown field names, invalid state literals, and negative counters fail at the mutation boundary instead of silently creating a divergent public payload. History statistics are validated and refreshed immediately before serialization.
 
 ## Inference path
 
@@ -69,7 +71,7 @@ History intentionally:
 
 The main annotated image always references a completed/pending history record and therefore matches its boxes. The live preview uses `/api/live/image` and intentionally has no overlay. Never overlay the latest result on the latest capture: model latency makes them different frames.
 
-The frontend receives state through initial HTTP fetches plus `/api/events`. It can reconnect and refresh history. Debug details expose raw responses, the immutable session-baseline prompt, the provider transport schema, its schema profile, generation settings, coordinate orders, errors, latency, attempts, and tokens. Each model call also has an explicit audit entry linking its call number to the exact prompt sent for that call, outcome, error, response index, usage, and retry reason; never align response/error/usage arrays by position. For Gemini, the prompt contains the complete Pydantic schema while request history contains the Google-compatible transport representation; application validation still uses `FrameAnalysis`.
+The frontend receives state through initial HTTP fetches plus `/api/events`. It can reconnect and refresh history. Uvicorn sends RFC 6455 protocol pings every 20 seconds with a 20-second timeout in the production container. The application additionally watches ASGI disconnect messages while waiting for events, sends a 15-second JSON heartbeat during idle periods, and limits every JSON send to five seconds. This prevents stopped/idle subscribers and backpressured half-open sockets from retaining relay tasks indefinitely. The browser ignores heartbeat messages and rejects malformed or structurally invalid event payloads before updating state. Debug details expose raw responses, the immutable session-baseline prompt, the provider transport schema, its schema profile, generation settings, coordinate orders, errors, latency, attempts, and tokens. Each model call also has an explicit audit entry linking its call number to the exact prompt sent for that call, outcome, error, response index, usage, and retry reason; never align response/error/usage arrays by position. For Gemini, the prompt contains the complete Pydantic schema while request history contains the Google-compatible transport representation; application validation still uses `FrameAnalysis`.
 
 Gemini credentials may originate from the backend environment or from the settings dialog. A web-submitted key is validated before use, retained only by the active backend object in process memory, and never returned to the browser. Provider replacement is serialized with session start: credentials cannot change while a monitor session is active. Resetting restores the startup environment value, and process restart always discards the web override.
 
@@ -82,12 +84,12 @@ Gemini credentials may originate from the backend environment or from the settin
 - Invalid box: no clamping or repair; validation fails visibly.
 - Exact same-category duplicate box: canonical post-processing keeps the first, drops later duplicates, logs/stores warnings, and preserves raw output; no approximate suppression is allowed.
 - Process restart: history and session state are lost by design.
-- Browser disconnect: backend monitoring continues; WebSocket reconnect restores status/history.
+- Browser disconnect: the relay observes the disconnect or bounded send failure and unsubscribes; backend monitoring continues, and frontend WebSocket reconnect restores status/history.
 
 ## Extension points
 
 - New provider: implement `VisionBackend`; override `prepare_output_schema()` only when the provider transport requires a documented schema subset, and keep semantics in the shared prompt.
-- New model coordinate convention: add a narrow adapter in `coordinates.py` plus full box-field tests.
+- New model coordinate convention: add a narrow adapter in `coordinates.py` plus full box-field tests. Box discovery within an analysis payload must remain Pydantic-annotation-driven so newly nested `BoundingBox` fields cannot bypass conversion.
 - New analysis field: change Pydantic first, then prompt version/schema version, coordinate conversion if relevant, frontend types/UI, tests, and changelog.
 
 Multi-camera, persistence, authentication, temporal analysis, notifications, and production safety controls are architectural projects, not small extensions to the current service.

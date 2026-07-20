@@ -60,7 +60,7 @@ Model-native exception currently implemented:
 | Gemini | canonical YXYX | canonical YXYX |
 | Other Ollama families | canonical YXYX | canonical YXYX |
 
-Conversion must include `infant_box`, nullable `mouth_nose_box`, every `related_objects[].box`, every `adults[].adult_box`, and every `cats[].cat_box`. Add future box fields to conversion and tests in the same change. Raw responses are never rewritten in history.
+Conversion recursively follows `BoundingBox` annotations in `FrameAnalysis` and nested Pydantic models rather than matching known field names. The contract test independently discovers every bounding-box leaf through JSON Schema and compares it with the reviewed path set; adding a new box therefore requires explicit test acknowledgement while conversion itself applies automatically. Raw responses are never rewritten in history.
 
 Out-of-range, reversed, missing, non-integer, or enum-invalid data is a validation failure. Do not clamp or reorder it silently.
 

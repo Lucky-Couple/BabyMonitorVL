@@ -20,10 +20,10 @@ The MVP intentionally uses a multimodal LLM/VLM for all semantic visual interpre
 - Capture and inference remain separate asynchronous tasks.
 - `latest_capture` is for the unannotated live preview. The annotated result must always use the exact historical JPEG submitted to the model.
 - History is process-memory-only and is pruned only by `HISTORY_MAX_BYTES`. Do not add persistence, a frame-count cap, or a TTL without an explicit product decision and migration note.
-- RTSP reconnect backoff remains bounded exponential backoff: 1, 2, 4, 8, 16, then 30 seconds. Status keeps consecutive `reconnect_attempt` separate from nullable `reconnect_delay_seconds`; never overload the attempt counter with a duration.
+- RTSP reconnect backoff remains bounded exponential backoff: 1, 2, 4, 8, 16, then 30 seconds. Status keeps consecutive `reconnect_attempt` separate from nullable `reconnect_delay_seconds`; never overload the attempt counter with a duration. Preserve both FFmpeg network I/O timeouts and the Python complete-JPEG watchdog so a half-open camera cannot block reconnection indefinitely. The watchdog interval must account for configured low FPS.
 - No audio, push, SMS, email, or audible alarm is part of this MVP.
 - API and UI coordinates are always canonical `[ymin, xmin, ymax, xmax]`, integer normalized to `0..1000`.
-- Ollama model basenames matching `qwen*` use model-native `[xmin, ymin, xmax, ymax]`; convert every box to canonical order before Pydantic validation and API/history exposure. Gemini and unknown model families use canonical order unless a tested model adapter says otherwise.
+- Ollama model basenames matching `qwen*` use model-native `[xmin, ymin, xmax, ymax]`; convert every box to canonical order before Pydantic validation and API/history exposure. Conversion is driven recursively by Pydantic `BoundingBox` annotations, not a field-name allowlist. Gemini and unknown model families use canonical order unless a tested model adapter says otherwise.
 - `mouth_nose_box` is the sole permitted limited hidden-region estimate: the VLM may infer its spatial location only from connected visible head geometry, orientation, outline, and nearby facial landmarks. Partial/full occlusion still requires visible object pixels overlapping that region. Never extend this exception to airflow, breathing, suffocation, health, hidden-body reconstruction, or temporal inference.
 - Never silently clamp, reorder, smooth, or fabricate model boxes. The sole deduplication exception is exact coordinate equality within the same semantic category: keep the first box, drop later boxes, preserve the raw response, emit a server warning, and store that warning in per-call history. Related objects are deduplicated only within one infant observation; the same object box may remain associated with different infants. Never add IoU/fuzzy suppression without an explicit product decision.
 - Preserve provider raw responses byte-for-character in history. Parsing may tolerate only one JSON value with an optional `json`/empty Markdown fence wrapper; never discard prose, accept a second JSON value, or use greedy substring extraction to hide malformed output.
@@ -71,9 +71,11 @@ While editing:
 
 - Keep changes scoped and explicit; avoid unrelated refactors.
 - Maintain async cancellation and session-id guards around capture/inference tasks.
+- WebSocket delivery must concurrently observe client disconnects, bound every application send, and retain an idle heartbeat; protocol ping alone does not release an application task that never receives a disconnect event.
 - Sanitize errors before storing or publishing them.
 - Add or update tests at the same time as behavior changes.
 - Keep backend Pydantic types and frontend TypeScript types synchronized.
+- Public monitor status must remain a validated `MonitorStatus` model; do not replace it with an untyped dictionary. Keep the Python/TypeScript enum and interface sync tests current when either public contract changes.
 - Keep UI enum labels stable and preserve English `summary`/`evidence` for provider comparison.
 - The overlay category palette is stable: infant blue, mouth/nose green, blanket amber, pillow indigo, toy orange, hand cyan, other occluder red, cat purple, adult pink. Change it only on explicit UI direction.
 - Current overlay boxes are thin (`2` main, `1.5` history) and label backgrounds use `fillOpacity=0.45`. Do not add label displacement, fuzzy deduplication, leader lines, or CV-derived corrections without explicit approval.

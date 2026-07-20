@@ -41,6 +41,9 @@ class Settings:
     model_timeout_seconds: float = field(
         default_factory=lambda: _env_float("MODEL_TIMEOUT_SECONDS", 60.0)
     )
+    rtsp_stall_timeout_seconds: float = field(
+        default_factory=lambda: _env_float("RTSP_STALL_TIMEOUT_SECONDS", 30.0)
+    )
     history_max_bytes: int = field(
         default_factory=lambda: _env_int("HISTORY_MAX_BYTES", 1024 * 1024 * 1024)
     )
@@ -54,6 +57,8 @@ class Settings:
     def __post_init__(self) -> None:
         if not math.isfinite(self.model_timeout_seconds) or self.model_timeout_seconds <= 0:
             raise ValueError("MODEL_TIMEOUT_SECONDS must be a finite number greater than 0")
+        if not math.isfinite(self.rtsp_stall_timeout_seconds) or self.rtsp_stall_timeout_seconds <= 0:
+            raise ValueError("RTSP_STALL_TIMEOUT_SECONDS must be a finite number greater than 0")
         if self.history_max_bytes <= 0:
             raise ValueError("HISTORY_MAX_BYTES must be greater than 0")
         for name, value in (("MAX_INFANTS", self.max_infants), ("MAX_ADULTS", self.max_adults)):

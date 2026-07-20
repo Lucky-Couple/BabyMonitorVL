@@ -71,6 +71,7 @@ uv run uvicorn babymonitorvl.main:app --host 127.0.0.1 --port 8000
 | `DEFAULT_OLLAMA_MODEL` | `qwen3-vl:4b` | Ollama 默认模型 |
 | `DEFAULT_GEMINI_MODEL` | `gemini-3.5-flash` | Gemini 默认模型 |
 | `MODEL_TIMEOUT_SECONDS` | `60` | 单次模型调用超时，必须为有限正数 |
+| `RTSP_STALL_TIMEOUT_SECONDS` | `30` | FFmpeg 网络 I/O 与完整 JPEG 停滞检测基线；低 FPS 时帧 watchdog 自动放宽 |
 | `HISTORY_MAX_BYTES` | `1073741824` | JPEG 和调试 payload 的历史预算，必须大于 0 |
 | `MAX_INFANTS` | `1` | 单帧婴儿数量上限，范围 `1–64` |
 | `MAX_ADULTS` | `4` | 单帧成人数量上限，范围 `1–64` |

@@ -2,7 +2,12 @@ import asyncio
 
 import pytest
 
-from babymonitorvl.ffmpeg import build_ffmpeg_command, jpeg_dimensions, read_mjpeg_frames
+from babymonitorvl.ffmpeg import (
+    FrameReadTimeout,
+    build_ffmpeg_command,
+    jpeg_dimensions,
+    read_mjpeg_frames,
+)
 
 
 def fake_jpeg(width: int = 32, height: int = 16) -> bytes:
@@ -32,9 +37,21 @@ async def test_reads_multiple_mjpeg_frames_across_chunks() -> None:
 
 
 def test_ffmpeg_command_samples_and_scales_without_shell() -> None:
-    command = build_ffmpeg_command("ffmpeg", "rtsp://camera/stream", 1.0, "tcp", 1280)
+    command = build_ffmpeg_command("ffmpeg", "rtsp://camera/stream", 1.0, "tcp", 1280, 12.5)
     assert command[0] == "ffmpeg"
     assert "-rtsp_transport" in command
     assert "fps=1.0" in command[command.index("-vf") + 1]
     assert "1280" in command[command.index("-vf") + 1]
+    assert command[command.index("-rw_timeout") + 1] == "12500000"
+    assert command[command.index("-timeout") + 1] == "12500000"
+    assert command.index("-rw_timeout") < command.index("-i")
+    assert command.index("-timeout") < command.index("-i")
     assert command[-1] == "pipe:1"
+
+
+@pytest.mark.asyncio
+async def test_complete_frame_watchdog_fails_a_stalled_pipe() -> None:
+    reader = asyncio.StreamReader()
+    frames = read_mjpeg_frames(reader, frame_timeout_seconds=0.01)
+    with pytest.raises(FrameReadTimeout, match="no complete JPEG frame"):
+        await anext(frames)

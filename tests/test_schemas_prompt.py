@@ -426,6 +426,41 @@ def test_non_qwen_models_keep_canonical_yxyx_order() -> None:
     assert model_box_order(ProviderName.GEMINI, "qwen-compatible-proxy") is BoxCoordinateOrder.YXYX
 
 
+def test_frame_analysis_bounding_box_paths_are_explicitly_tracked() -> None:
+    schema = FrameAnalysis.model_json_schema()
+    definitions = schema["$defs"]
+    paths: set[str] = set()
+
+    def walk(node, path: str) -> None:
+        if not isinstance(node, dict):
+            return
+        reference = node.get("$ref")
+        if isinstance(reference, str):
+            name = reference.rsplit("/", 1)[-1]
+            if name == "BoundingBox":
+                paths.add(path)
+                return
+            walk(definitions[name], path)
+            return
+        for option in node.get("anyOf", []):
+            walk(option, path)
+        properties = node.get("properties")
+        if isinstance(properties, dict):
+            for name, child in properties.items():
+                walk(child, f"{path}.{name}" if path else name)
+        if "items" in node:
+            walk(node["items"], f"{path}[]")
+
+    walk(schema, "")
+    assert paths == {
+        "infants[].infant_box",
+        "infants[].mouth_nose_box",
+        "infants[].related_objects[].box",
+        "adults[].adult_box",
+        "cats[].cat_box",
+    }
+
+
 def test_qwen_boxes_are_normalized_for_api_and_ui() -> None:
     raw = {
         "schema_version": "1.3",

@@ -5,7 +5,7 @@ from babymonitorvl.config import Settings
 from babymonitorvl.main import create_app
 from babymonitorvl.providers.base import ProviderHealth
 from babymonitorvl.providers.gemini import GeminiBackend
-from babymonitorvl.schemas import ProviderName
+from babymonitorvl.schemas import MonitorStatus, ProviderName
 
 
 @pytest.mark.asyncio
@@ -25,6 +25,7 @@ async def test_prompt_and_stopped_status_are_available_without_models(tmp_path) 
     assert status.json()["reconnect_attempt"] == 0
     assert status.json()["reconnect_delay_seconds"] is None
     assert status.json()["history"]["items"] == 0
+    assert set(status.json()) == set(MonitorStatus.model_fields)
 
 
 @pytest.mark.asyncio
