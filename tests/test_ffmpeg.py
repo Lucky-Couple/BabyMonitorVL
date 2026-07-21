@@ -36,12 +36,12 @@ async def test_reads_multiple_mjpeg_frames_across_chunks() -> None:
     assert frames == [first, second]
 
 
-def test_ffmpeg_command_samples_and_scales_without_shell() -> None:
-    command = build_ffmpeg_command("ffmpeg", "rtsp://camera/stream", 1.0, "tcp", 1280, 12.5)
+def test_ffmpeg_command_samples_without_resizing_or_shell() -> None:
+    command = build_ffmpeg_command("ffmpeg", "rtsp://camera/stream", 1.0, "tcp", 12.5)
     assert command[0] == "ffmpeg"
     assert "-rtsp_transport" in command
-    assert "fps=1.0" in command[command.index("-vf") + 1]
-    assert "1280" in command[command.index("-vf") + 1]
+    assert command[command.index("-vf") + 1] == "fps=1.0"
+    assert all("scale" not in argument for argument in command)
     assert command[command.index("-timeout") + 1] == "12500000"
     assert command.index("-timeout") < command.index("-i")
     assert "-rw_timeout" not in command

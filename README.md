@@ -77,7 +77,7 @@ uv run uvicorn babymonitorvl.main:app --host 127.0.0.1 --port 8000
 | `MAX_ADULTS` | `4` | 单帧成人数量上限，范围 `1–64` |
 | `FFMPEG_BINARY` | `ffmpeg` | FFmpeg 可执行文件 |
 
-RTSP 地址、FPS、provider、model、TCP/UDP 和图像长边上限可在页面配置。服务同时只运行一个监控会话，停止会话不会清空历史，服务重启会清空。
+RTSP 地址、FPS、provider、model 和 TCP/UDP 可在页面配置。FFmpeg 保留摄像头流的原始分辨率，只负责定频抽帧和 JPEG 编码。服务同时只运行一个监控会话，停止会话不会清空历史，服务重启会清空。
 
 ### Bounding box 坐标约定
 

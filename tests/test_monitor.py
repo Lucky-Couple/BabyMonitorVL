@@ -12,6 +12,7 @@ from babymonitorvl.events import EventHub
 from babymonitorvl.ffmpeg import FrameReadTimeout
 from babymonitorvl.history import HistoryStore
 from babymonitorvl.monitor import (
+    CaptureTelemetry,
     CapturedFrame,
     MonitorService,
     local_validation_correction,
@@ -43,12 +44,37 @@ def test_latest_frame_queue_replaces_stale_frame() -> None:
     assert queue.get_nowait().sequence == 2
 
 
+def test_capture_telemetry_measures_sampled_jpeg_pipe_over_sliding_window() -> None:
+    telemetry = CaptureTelemetry(window_seconds=3.0)
+
+    assert telemetry.observe(10.0, 1000) == (None, None)
+    measured_fps, preview_kbps = telemetry.observe(11.0, 2000)
+    assert measured_fps == pytest.approx(1.0)
+    assert preview_kbps == pytest.approx(16.0)
+
+    measured_fps, preview_kbps = telemetry.observe(13.5, 3000)
+    assert measured_fps == pytest.approx(0.4)
+    assert preview_kbps == pytest.approx(9.6)
+
+
+def test_capture_telemetry_rejects_invalid_configuration_and_sizes() -> None:
+    with pytest.raises(ValueError, match="window must be positive"):
+        CaptureTelemetry(window_seconds=0)
+    with pytest.raises(ValueError, match="byte count"):
+        CaptureTelemetry().observe(1.0, -1)
+
+
 def test_monitor_status_rejects_unknown_fields_and_invalid_assignments() -> None:
     status = MonitorStatus()
     with pytest.raises(ValidationError, match="no_such_attribute"):
         setattr(status, "reconect_delay_seconds", 1)
     with pytest.raises(ValidationError, match="greater than or equal to 0"):
         status.capture_count = -1
+
+
+def test_monitor_start_contract_does_not_expose_capture_resizing() -> None:
+    properties = MonitorStartRequest.model_json_schema()["properties"]
+    assert "max_image_edge" not in properties
 
 
 class StalledFFmpegProcess:

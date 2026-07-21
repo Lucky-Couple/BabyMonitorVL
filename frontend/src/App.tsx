@@ -23,6 +23,15 @@ hljs.registerLanguage("json", jsonLanguage);
 
 const RTSP_DRAFT_STORAGE_KEY = "babymonitorvl.rtsp-draft";
 
+interface LiveFrameState {
+  imageUrl: string;
+  capturedAt: string | null;
+  width: number | null;
+  height: number | null;
+  measuredFps: number | null;
+  previewBitrateKbps: number | null;
+}
+
 function readRtspDraft(): string {
   try {
     return window.sessionStorage.getItem(RTSP_DRAFT_STORAGE_KEY) ?? "";
@@ -191,6 +200,12 @@ function formatTokens(value: number | null | undefined) {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
 
+function formatPreviewBitrate(value: number | null) {
+  if (value === null) return "—";
+  if (value >= 1000) return `${(value / 1000).toFixed(2)} Mbps`;
+  return `${value.toFixed(0)} kbps`;
+}
+
 function historySubjectText(item: HistorySummary) {
   if (!item.analysis) return "婴儿 — · 成人 — · 猫 —";
   return `婴儿 ${item.analysis.infants.length} · 成人 ${item.analysis.adult_presence === "unknown" ? "未知" : item.analysis.adults.length} · 猫 ${(item.analysis.cats ?? []).length}`;
@@ -300,7 +315,10 @@ function AnnotatedFrame({ detail }: { detail: HistoryDetail | null }) {
     return <div className="empty-frame">等待第一帧分析结果</div>;
   }
   return (
-    <div className="annotated-frame" style={{ aspectRatio: `${detail.image_width} / ${detail.image_height}` }}>
+    <div
+      className="annotated-frame"
+      style={{ aspectRatio: `${detail.image_width} / ${detail.image_height}` }}
+    >
       <img src={`${detail.image_url}?v=${detail.completed_at ?? detail.captured_at}`} alt="已分析监控帧" />
       <BoxOverlay analysis={detail.analysis} />
     </div>
@@ -480,14 +498,13 @@ export default function App() {
   const [nextHistoryCursor, setNextHistoryCursor] = useState<string | null>(null);
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [detail, setDetail] = useState<HistoryDetail | null>(null);
-  const [liveUrl, setLiveUrl] = useState<string | null>(null);
+  const [liveFrame, setLiveFrame] = useState<LiveFrameState | null>(null);
   const [provider, setProvider] = useState<ProviderName>("ollama");
   const [model, setModel] = useState("qwen3-vl:4b");
   const [rtspUrl, setRtspUrl] = useState(readRtspDraft);
   const [fps, setFps] = useState(1);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [transport, setTransport] = useState<"tcp" | "udp">("tcp");
-  const [maxEdge, setMaxEdge] = useState(1280);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [geminiKey, setGeminiKey] = useState("");
@@ -569,7 +586,14 @@ export default function App() {
         if (event.type === "heartbeat") return;
         if (event.type === "status" && isMonitorStatus(event.data)) setStatus(event.data);
         if (event.type === "capture" && isRecord(event.data) && typeof event.data.image_url === "string") {
-          setLiveUrl(`${event.data.image_url}&t=${Date.now()}`);
+          setLiveFrame({
+            imageUrl: `${event.data.image_url}&t=${Date.now()}`,
+            capturedAt: typeof event.data.captured_at === "string" ? event.data.captured_at : null,
+            width: isNonNegativeNumber(event.data.width) ? event.data.width : null,
+            height: isNonNegativeNumber(event.data.height) ? event.data.height : null,
+            measuredFps: isNullableNumber(event.data.measured_fps) ? event.data.measured_fps : null,
+            previewBitrateKbps: isNullableNumber(event.data.preview_bitrate_kbps) ? event.data.preview_bitrate_kbps : null,
+          });
         }
         if (
           (event.type === "analysis_completed" || event.type === "analysis_failed")
@@ -678,10 +702,10 @@ export default function App() {
           provider,
           model,
           rtsp_transport: transport,
-          max_image_edge: maxEdge,
         }),
       });
       if (!response.ok) throw new Error((await response.json()).detail ?? "启动失败");
+      setLiveFrame(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -776,7 +800,6 @@ export default function App() {
         {showAdvanced && (
           <div className="advanced-row">
             <label><span>RTSP Transport</span><select value={transport} onChange={(e) => setTransport(e.target.value as "tcp" | "udp")} disabled={active}><option value="tcp">TCP</option><option value="udp">UDP</option></select></label>
-            <label><span>图像长边上限</span><input type="number" min="320" max="4096" value={maxEdge} onChange={(e) => setMaxEdge(Number(e.target.value))} disabled={active} /></label>
           </div>
         )}
         <div className="provider-health">
@@ -866,12 +889,40 @@ export default function App() {
       {status.last_error && <div className="stream-error" title={status.last_error}>{status.last_error}</div>}
 
       <main className="monitor-grid">
-        <section className="panel result-visual">
+        <section className="panel primary-live">
           <div className="panel-heading">
-            <div><span className="section-number">01</span><h2>最近完成分析</h2></div>
-            <div className="frame-meta" title={`抽帧 ${formatTime(detail?.captured_at ?? null)} · 完成 ${formatTime(detail?.completed_at ?? null)}`}>抽帧 {formatTime(detail?.captured_at ?? null)} · 完成 {formatTime(detail?.completed_at ?? null)}</div>
+            <div><span className="section-number">01</span><span className="live-dot" /><h2>最新 RTSP 抽帧</h2></div>
+            <div className="frame-meta" title={formatTime(liveFrame?.capturedAt ?? status.last_capture_at)}>{formatTime(liveFrame?.capturedAt ?? status.last_capture_at)}</div>
           </div>
-          <AnnotatedFrame detail={detail} />
+          {liveFrame ? (
+            <div
+              className="live-frame"
+              style={liveFrame.width && liveFrame.height ? { aspectRatio: `${liveFrame.width} / ${liveFrame.height}` } : undefined}
+            >
+              <img src={liveFrame.imageUrl} alt="最新 RTSP 抽帧" />
+            </div>
+          ) : <div className="empty-live">尚无实时画面</div>}
+          <div className="live-debug" aria-label="采样预览调试信息">
+            <div>
+              <span>RTSP 原始分辨率</span>
+              <strong title={liveFrame?.width && liveFrame.height ? `${liveFrame.width} × ${liveFrame.height}` : "—"}>
+                {liveFrame?.width && liveFrame.height ? `${liveFrame.width} × ${liveFrame.height}` : "—"}
+              </strong>
+            </div>
+            <div>
+              <span>实测 / 目标 FPS</span>
+              <strong title={`${liveFrame?.measuredFps?.toFixed(2) ?? "—"} / ${status.fps?.toFixed(2) ?? "—"}`}>
+                {liveFrame?.measuredFps?.toFixed(2) ?? "—"} / {status.fps?.toFixed(2) ?? "—"}
+              </strong>
+            </div>
+            <div>
+              <span>JPEG 预览数据率</span>
+              <strong title={`${formatPreviewBitrate(liveFrame?.previewBitrateKbps ?? null)}；不是摄像头原始编码码率`}>
+                {formatPreviewBitrate(liveFrame?.previewBitrateKbps ?? null)}
+              </strong>
+            </div>
+          </div>
+          <p className="live-note">FFmpeg 保持 RTSP 视频原始宽高，只进行定频抽帧和 JPEG 编码；这里不叠加旧分析框。</p>
         </section>
 
         <section className="panel analysis-result">
@@ -879,16 +930,22 @@ export default function App() {
           <AnalysisPanel analysis={detail?.analysis} />
         </section>
 
-        <aside className="panel live-preview">
-          <div className="panel-heading"><div><span className="live-dot" /><h2>最新 RTSP 抽帧</h2></div><span title={formatTime(status.last_capture_at)}>{formatTime(status.last_capture_at)}</span></div>
-          {liveUrl ? <img src={liveUrl} alt="最新 RTSP 抽帧" /> : <div className="empty-live">尚无实时画面</div>}
-          <p>实时预览不叠加旧分析框，避免帧与结果错配。</p>
-        </aside>
       </main>
+
+      <section className="panel latest-analysis-section">
+        <div className="panel-heading">
+          <div><span className="section-number">03</span><h2>最近完成分析</h2></div>
+          <span title={`抽帧 ${formatTime(detail?.captured_at ?? null)} · 完成 ${formatTime(detail?.completed_at ?? null)}`}>
+            抽帧 {formatTime(detail?.captured_at ?? null)} · 完成 {formatTime(detail?.completed_at ?? null)}
+          </span>
+        </div>
+        <AnnotatedFrame detail={detail} />
+        <p>完整尺寸标注视图；图片、模型框和当前选中的历史记录严格对应。</p>
+      </section>
 
       <section className="history-section">
         <div className="history-heading">
-          <div><span className="section-number">03</span><h2>进程内调试历史</h2></div>
+          <div><span className="section-number">04</span><h2>进程内调试历史</h2></div>
           <span title={`最新在前 · 已加载 ${history.length} / 内存共 ${status.history.items} 帧`}>最新在前 · 已加载 {history.length} / 内存共 {status.history.items} 帧</span>
         </div>
         <div className="history-grid" data-testid="history-grid">
@@ -922,7 +979,7 @@ export default function App() {
 
       {detail && (
         <section className="debug-section">
-          <div className="history-heading"><div><span className="section-number">04</span><h2>请求审计</h2></div><span title={detail.prompt_version}>{detail.prompt_version}</span></div>
+          <div className="history-heading"><div><span className="section-number">05</span><h2>请求审计</h2></div><span title={detail.prompt_version}>{detail.prompt_version}</span></div>
           <div className="debug-grid">
             <details open><summary>逐次调用审计</summary><AttemptAudit detail={detail} /></details>
             <details><summary>原始模型响应</summary>{detail.raw_responses.length > 0 ? detail.raw_responses.map((response, index) => {

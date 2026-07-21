@@ -256,7 +256,6 @@ class MonitorStartRequest(BaseModel):
     provider: ProviderName = ProviderName.OLLAMA
     model: str | None = Field(default=None, max_length=256)
     rtsp_transport: Literal["tcp", "udp"] = "tcp"
-    max_image_edge: int = Field(default=1280, ge=320, le=4096)
 
     @field_validator("rtsp_url")
     @classmethod

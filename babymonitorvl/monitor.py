@@ -8,7 +8,8 @@ import re
 import shutil
 import time
 import uuid
-from dataclasses import dataclass
+from collections import deque
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
@@ -107,6 +108,34 @@ class CapturedFrame:
     width: int
     height: int
     sequence: int
+
+
+@dataclass(slots=True)
+class CaptureTelemetry:
+    """Measure the sampled-JPEG pipe, not the camera's source codec bitrate."""
+
+    window_seconds: float = 5.0
+    samples: deque[tuple[float, int]] = field(default_factory=deque)
+
+    def __post_init__(self) -> None:
+        if self.window_seconds <= 0:
+            raise ValueError("capture telemetry window must be positive")
+
+    def observe(self, observed_at: float, jpeg_bytes: int) -> tuple[float | None, float | None]:
+        if jpeg_bytes < 0:
+            raise ValueError("JPEG byte count must be non-negative")
+        self.samples.append((observed_at, jpeg_bytes))
+        cutoff = observed_at - self.window_seconds
+        while len(self.samples) > 1 and self.samples[0][0] < cutoff:
+            self.samples.popleft()
+        if len(self.samples) < 2:
+            return None, None
+        elapsed = self.samples[-1][0] - self.samples[0][0]
+        if elapsed <= 0:
+            return None, None
+        measured_fps = (len(self.samples) - 1) / elapsed
+        preview_kbps = sum(size for _, size in list(self.samples)[1:]) * 8 / elapsed / 1000
+        return measured_fps, preview_kbps
 
 
 def offer_latest(queue: asyncio.Queue[CapturedFrame], frame: CapturedFrame) -> bool:
@@ -252,6 +281,7 @@ class MonitorService:
         reconnect_delay = 1
         reconnect_attempt = 0
         sequence = 0
+        telemetry = CaptureTelemetry()
         try:
             while self._session_id == session_id:
                 self._status.state = "connecting" if reconnect_attempt == 0 else "reconnecting"
@@ -262,7 +292,6 @@ class MonitorService:
                     config.rtsp_url,
                     config.fps,
                     config.rtsp_transport,
-                    config.max_image_edge,
                     self.settings.rtsp_stall_timeout_seconds,
                 )
                 stderr_lines: list[str] = []
@@ -292,6 +321,7 @@ class MonitorService:
                         sequence += 1
                         captured_at = utc_now()
                         frame = CapturedFrame(image_bytes, captured_at, width, height, sequence)
+                        measured_fps, preview_bitrate_kbps = telemetry.observe(time.monotonic(), len(image_bytes))
                         self._latest_capture = frame
                         self._status.state = "streaming"
                         self._status.capture_count = sequence
@@ -312,6 +342,8 @@ class MonitorService:
                                     "image_url": f"/api/live/image?v={sequence}",
                                     "width": width,
                                     "height": height,
+                                    "measured_fps": measured_fps,
+                                    "preview_bitrate_kbps": preview_bitrate_kbps,
                                 },
                             }
                         )

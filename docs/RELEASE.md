@@ -46,7 +46,7 @@ docker compose config
 docker build --pull -t babymonitorvl:release-candidate .
 ```
 
-The Docker build is also the FFmpeg CLI compatibility gate: it verifies the pinned official release, exercises an actual RTSP open path with the configured RTSP-native timeout/transport options, and executes the capture pipeline's filters, resize, MJPEG encoder, and image-pipe muxer. Help-text presence alone is not a compatibility check. Do not waive this gate after changing either `Dockerfile` or `build_ffmpeg_command()`.
+The Docker build is also the FFmpeg CLI compatibility gate: it verifies the pinned official release, exercises an actual RTSP open path with the configured RTSP-native timeout/transport options, and executes the capture pipeline's FPS filter, MJPEG encoder, and image-pipe muxer without resizing. Help-text presence alone is not a compatibility check. Do not waive this gate after changing either `Dockerfile` or `build_ffmpeg_command()`.
 
 Run an isolated container test if the native environment is not trusted:
 

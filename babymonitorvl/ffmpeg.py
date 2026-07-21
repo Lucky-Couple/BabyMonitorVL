@@ -17,13 +17,8 @@ def build_ffmpeg_command(
     rtsp_url: str,
     fps: float,
     transport: str,
-    max_image_edge: int,
     io_timeout_seconds: float = 30.0,
 ) -> list[str]:
-    scale = (
-        f"scale=w='if(gt(iw,ih),min(iw,{max_image_edge}),-2)'"
-        f":h='if(gt(iw,ih),-2,min(ih,{max_image_edge}))'"
-    )
     io_timeout_microseconds = max(1, int(io_timeout_seconds * 1_000_000))
     return [
         binary,
@@ -39,7 +34,7 @@ def build_ffmpeg_command(
         rtsp_url,
         "-an",
         "-vf",
-        f"fps={fps},{scale}",
+        f"fps={fps}",
         "-q:v",
         "4",
         "-f",

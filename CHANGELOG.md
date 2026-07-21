@@ -8,6 +8,9 @@ All notable changes to this project are documented here. The format follows Keep
 
 - Excluded every `gemini-2*` model from Google AI Studio model discovery, even when stale capability metadata still advertises content generation.
 - Updated the shared prompt with infrared/night-vision guidance that distinguishes fitted clothing from loose bedding through exposed-leg anchors, body-contour fit, drape, folds, and mattress overflow rather than grayscale color or texture.
+- Promoted the latest unannotated RTSP sample to the primary monitor panel and added sampled resolution, measured/target FPS, and JPEG-pipe data-rate diagnostics with explicit source-resolution/bitrate labeling.
+- Promoted the exact-frame annotated result to a full-width section 03 at its original aspect ratio, with debug history and request audit renumbered to sections 04 and 05.
+- Removed the application-level 1280-pixel FFmpeg resize and its Web control; capture, preview, history, and model requests now preserve the RTSP stream's decoded source resolution unless a future tested model capability requires provider-specific adaptation.
 
 ### Active contract metadata
 
