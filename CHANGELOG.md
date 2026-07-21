@@ -4,6 +4,16 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+### Changed
+
+- Excluded every `gemini-2*` model from Google AI Studio model discovery, even when stale capability metadata still advertises content generation.
+- Updated the shared prompt with infrared/night-vision guidance that distinguishes fitted clothing from loose bedding through exposed-leg anchors, body-contour fit, drape, folds, and mattress overflow rather than grayscale color or texture.
+
+### Active contract metadata
+
+- Prompt version: `baby-monitor-single-frame-v9-infrared-bedding-geometry`.
+- Analysis schema version: `1.3`.
+
 ## [0.2.2] - 2026-07-22
 
 ### Fixed

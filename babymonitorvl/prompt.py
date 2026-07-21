@@ -7,7 +7,7 @@ from .coordinates import BoxCoordinateOrder, schema_for_box_order
 from .schemas import FrameAnalysis
 
 
-PROMPT_VERSION = "baby-monitor-single-frame-v8-mouth-nose-occlusion"
+PROMPT_VERSION = "baby-monitor-single-frame-v9-infrared-bedding-geometry"
 
 
 def output_schema(
@@ -79,6 +79,12 @@ Tasks:
 8. For each cat, locate visible cat pixels with cat_box and classify proximity_to_infant as separate, near_infant, overlapping_infant, or unknown. Use unknown when no infant can be reliably located.
 9. Classify infant posture, mouth/nose occlusion, and blanket coverage using only the schema enums.
 10. Give concise English evidence strings that point to visible facts.
+
+INFRARED / NIGHT-VISION GUIDANCE:
+- First recognize whether the frame appears to be monochrome infrared or night vision. Infrared grayscale is not by itself poor image quality, but clothing, blankets, and sheets may have nearly identical apparent color, brightness, and texture. In such frames, do not distinguish clothing from bedding by grayscale tone alone.
+- Use visible geometry instead. Body-worn clothing normally stays within and closely follows a connected body silhouette. A blanket, sheet, or loose cover may drape beyond the infant's silhouette, bridge gaps between limbs, continue onto the mattress or crib, or form folds and edges independent of the body contour.
+- Use a clearly visible bare thigh or leg segment as an anatomical anchor. Textile on the torso side of that exposed segment may be clothing only when it remains fitted to the connected body contour. Textile continuing past the exposed limb toward the feet, outside the body outline, or onto the mattress is not the same torso garment and may be bedding when loose textile geometry is visible. Do not use image-up/image-down alone as anatomical direction, and do not confuse a separate fitted sock or pant leg with bedding.
+- Clothing does not count as blanket coverage and must not be added to related_objects. If infrared geometry is insufficient to separate fitted clothing from loose bedding, set blanket_coverage to unknown rather than guessing and mention the infrared ambiguity in evidence. If an uncertain textile nevertheless has visible pixels clearly overlapping mouth_nose_box, record it as other_occluder with the matching mouth/nose relation and assess the geometric occlusion; do not suppress clear overlap merely because the textile class is uncertain.
 
 MOUTH/NOSE CONSISTENCY RULES:
 - clear, partially_covered, and fully_covered require a non-null mouth_nose_box.

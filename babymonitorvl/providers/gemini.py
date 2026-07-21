@@ -177,13 +177,17 @@ class GeminiBackend(VisionBackend):
             if not isinstance(resource_name, str):
                 continue
             name = resource_name.removeprefix("models/")
+            normalized_name = name.casefold()
             actions = getattr(model, "supported_actions", None) or []
             normalized_actions = {str(action).replace("_", "").lower() for action in actions}
-            supported_family = name.startswith("gemini-") or name.startswith("gemma-4-")
+            supported_family = (
+                normalized_name.startswith("gemini-")
+                and not normalized_name.startswith("gemini-2")
+            ) or normalized_name.startswith("gemma-4-")
             if (
                 supported_family
                 and "generatecontent" in normalized_actions
-                and not any(marker in name.lower() for marker in excluded_variants)
+                and not any(marker in normalized_name for marker in excluded_variants)
             ):
                 result.add(name)
         return sorted(result)

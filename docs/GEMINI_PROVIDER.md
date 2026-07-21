@@ -99,6 +99,7 @@ During an occlusion scene, hosted `gemma-4-31b-it` returned a complete valid JSO
 
 For the dynamic Google model list, BabyMonitorVL uses the smallest portable request:
 
+- exclude every model basename beginning with `gemini-2`, even if stale discovery metadata still advertises `generateContent`; this product supports current Gemini 3 models and compatible hosted Gemma 4 image models only;
 - send `temperature=0` for the cross-provider comparison baseline;
 - omit `thinking_level` and use the provider/model default;
 - do not infer parameter support from the SDK's type definitions, enum members, or another model in the same family;

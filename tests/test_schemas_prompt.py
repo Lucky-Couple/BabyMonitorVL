@@ -113,7 +113,7 @@ def test_model_analysis_rejects_non_object_json() -> None:
 def test_prompt_embeds_exact_schema() -> None:
     schema = output_schema()
     prompt = build_prompt(schema)
-    assert PROMPT_VERSION == "baby-monitor-single-frame-v8-mouth-nose-occlusion"
+    assert PROMPT_VERSION == "baby-monitor-single-frame-v9-infrared-bedding-geometry"
     assert json.dumps(schema, ensure_ascii=False, separators=(",", ":")) in prompt
     assert "[ymin, xmin, ymax, xmax]" in prompt
     assert "Do not infer motion, breathing, airflow" in prompt
@@ -150,6 +150,15 @@ def test_prompt_embeds_exact_schema() -> None:
     assert "Never infer airflow, breathing, suffocation" in prompt
     assert "MOUTH/NOSE CONSISTENCY RULES" in prompt
     assert "fully_covered requires a visible related_objects entry" in prompt
+    assert "INFRARED / NIGHT-VISION GUIDANCE" in prompt
+    assert "do not distinguish clothing from bedding by grayscale tone alone" in prompt
+    assert "visible bare thigh or leg segment as an anatomical anchor" in prompt
+    assert "Body-worn clothing normally stays within and closely follows" in prompt
+    assert "continue onto the mattress or crib" in prompt
+    assert "Clothing does not count as blanket coverage" in prompt
+    assert "set blanket_coverage to unknown rather than guessing" in prompt
+    assert "record it as other_occluder" in prompt
+    assert "do not suppress clear overlap" in prompt
 
 
 def test_mouth_nose_coverage_is_distinct_from_simple_visibility() -> None:

@@ -27,6 +27,8 @@ class FakeModels:
         return [
             FakeModel("models/gemini-3.5-flash", ["generateContent", "countTokens"]),
             FakeModel("models/gemini-3.1-pro-preview", ["generate_content"]),
+            FakeModel("models/gemini-2.5-flash", ["generateContent"]),
+            FakeModel("models/gemini-2.0-flash", ["generateContent"]),
             FakeModel("models/gemma-4-31b-it", ["generateContent"]),
             FakeModel("models/gemma-4-26b-a4b-it", ["generate_content"]),
             FakeModel("models/gemma-3-27b-it", ["generateContent"]),
@@ -98,6 +100,7 @@ async def test_gemini_lists_only_compatible_image_analysis_models() -> None:
         "gemma-4-26b-a4b-it",
         "gemma-4-31b-it",
     ]
+    assert all(not model.startswith("gemini-2") for model in health.models)
 
 
 def test_gemini_usage_includes_thinking_tokens_as_output() -> None:

@@ -33,16 +33,18 @@ def test_application_versions_stay_in_sync(tmp_path) -> None:
     assert create_app(Settings(frontend_dist=tmp_path, gemini_api_key=None)).version == __version__
 
 
-def test_changelog_records_current_release_contract() -> None:
+def test_changelog_records_current_release_and_active_contract() -> None:
     changelog = (ROOT / "CHANGELOG.md").read_text(encoding="utf-8")
+    unreleased = changelog.split("## [Unreleased]", maxsplit=1)[1].split("\n## [", maxsplit=1)[0]
     current_release = changelog.split(f"## [{__version__}]", maxsplit=1)[1].split(
         "\n## [", maxsplit=1
     )[0]
     schema_versions = get_args(FrameAnalysis.model_fields["schema_version"].annotation)
     assert len(schema_versions) == 1
     assert f"Application version: `{__version__}`." in current_release
-    assert f"Prompt version: `{PROMPT_VERSION}`." in current_release
-    assert f"Analysis schema version: `{schema_versions[0]}`." in current_release
+    active_contract = unreleased if "### Active contract metadata" in unreleased else current_release
+    assert f"Prompt version: `{PROMPT_VERSION}`." in active_contract
+    assert f"Analysis schema version: `{schema_versions[0]}`." in active_contract
 
 
 def test_frontend_release_dependencies_do_not_use_latest() -> None:

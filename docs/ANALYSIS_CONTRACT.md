@@ -70,7 +70,7 @@ After canonical coordinate conversion, exact coordinate duplicates within the sa
 
 ## Shared prompt baseline
 
-Current prompt version: `baby-monitor-single-frame-v8-mouth-nose-occlusion`.
+Current prompt version: `baby-monitor-single-frame-v9-infrared-bedding-geometry`.
 
 The shared English prompt:
 
@@ -80,6 +80,7 @@ The shared English prompt:
 - treats adult presence as higher-priority than cat detection and rejects isolated limbs, reflections, photos, screens, dolls, prints, and age-ambiguous people as adult evidence;
 - excludes dolls, plush toys, prints, bedding folds, patterns, shadows, and ambiguous shapes;
 - defines posture, mouth/nose object coverage, blanket coverage, related objects, adult-presence consistency, cat proximity, and risk semantics;
+- recognizes monochrome infrared/night-vision frames and distinguishes fitted clothing from loose bedding using visible body-contour, exposed-leg, drape, fold, and mattress-overflow geometry rather than grayscale tone; ambiguous blanket classification remains `unknown`, while a class-uncertain textile with clear mouth/nose overlap remains grounded as `other_occluder`;
 - embeds the exact generated JSON Schema;
 - requires JSON only.
 
