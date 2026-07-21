@@ -4,6 +4,25 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [0.2.2] - 2026-07-22
+
+### Fixed
+
+- Upgraded the production container from Debian FFmpeg 7.1.5 to the pinned official FFmpeg 8.1.2 source release, verified by SHA-256, and added image-build execution checks for the exact RTSP timeout/open, filter, scaling, MJPEG, and image-pipe command contract.
+- Removed the generic `rw_timeout` input option because FFmpeg 8.1.2 advertises it in protocol help but the RTSP demuxer rejects it while opening an RTSP input; the RTSP-native `timeout` option and Python complete-JPEG watchdog remain active.
+- Prevented another silent FFmpeg CLI compatibility regression by making a command-capability smoke test part of the production image build rather than relying only on argument-list unit tests.
+- Added full-value hover text to clipped dashboard metrics, status errors, headings, and history-card rows, and clarified that the top-level input/output counters are cumulative.
+
+### Release metadata
+
+- Application version: `0.2.2`.
+- Prompt version: `baby-monitor-single-frame-v8-mouth-nose-occlusion`.
+- Analysis schema version: `1.3`.
+
+### Known limitations
+
+- Experimental, human-reviewed demo only; no medical, life-safety, unattended-monitoring, authentication, persistence, multi-camera, temporal reasoning, or external alerting guarantees.
+
 ## [0.2.1] - 2026-07-21
 
 ### Added

@@ -191,6 +191,22 @@ function formatTokens(value: number | null | undefined) {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
 
+function historySubjectText(item: HistorySummary) {
+  if (!item.analysis) return "婴儿 — · 成人 — · 猫 —";
+  return `婴儿 ${item.analysis.infants.length} · 成人 ${item.analysis.adult_presence === "unknown" ? "未知" : item.analysis.adults.length} · 猫 ${(item.analysis.cats ?? []).length}`;
+}
+
+function historyCallText(item: HistorySummary) {
+  const statusText = item.status === "error"
+    ? "分析失败"
+    : item.attempts > 1 && item.latency_ms
+      ? `重试后成功 · 耗时 ${(item.latency_ms / 1000).toFixed(1)}s`
+      : item.latency_ms
+        ? `耗时 ${(item.latency_ms / 1000).toFixed(1)}s`
+        : "分析中";
+  return `${statusText} · 调用 ${item.attempts} 次 · 输入 ${formatTokens(item.input_tokens)} · 输出 ${formatTokens(item.output_tokens)}`;
+}
+
 function connectionLabel(status: MonitorStatus) {
   if (status.state === "streaming") return "监控中";
   if (status.state === "stopped") return "已停止";
@@ -837,23 +853,23 @@ export default function App() {
       </dialog>
 
       <section className="metrics-grid">
-        <div><span>已抽帧</span><strong>{status.capture_count}</strong></div>
-        <div><span>已提交</span><strong>{status.submitted_count}</strong></div>
-        <div><span>已完成</span><strong>{status.completed_count}</strong></div>
-        <div><span>输入 Token</span><strong>{formatTokens(status.input_tokens)}</strong></div>
-        <div><span>输出 Token</span><strong>{formatTokens(status.output_tokens)}</strong></div>
-        <div><span>覆盖丢帧</span><strong>{status.dropped_count}</strong></div>
-        <div><span>最近延迟</span><strong>{status.last_latency_ms ? `${(status.last_latency_ms / 1000).toFixed(1)}s` : "—"}</strong></div>
-        <div><span>历史内存</span><strong>{formatBytes(status.history.bytes)}</strong><small>/ {formatBytes(status.history.max_bytes)}</small></div>
+        <div><span>已抽帧</span><strong title={String(status.capture_count)}>{status.capture_count}</strong></div>
+        <div><span>已提交</span><strong title={String(status.submitted_count)}>{status.submitted_count}</strong></div>
+        <div><span>已完成</span><strong title={String(status.completed_count)}>{status.completed_count}</strong></div>
+        <div><span>累计输入 Token</span><strong title={formatTokens(status.input_tokens)}>{formatTokens(status.input_tokens)}</strong></div>
+        <div><span>累计输出 Token</span><strong title={formatTokens(status.output_tokens)}>{formatTokens(status.output_tokens)}</strong></div>
+        <div><span>覆盖丢帧</span><strong title={String(status.dropped_count)}>{status.dropped_count}</strong></div>
+        <div><span>最近延迟</span><strong title={status.last_latency_ms ? `${(status.last_latency_ms / 1000).toFixed(1)}s` : "—"}>{status.last_latency_ms ? `${(status.last_latency_ms / 1000).toFixed(1)}s` : "—"}</strong></div>
+        <div title={`${formatBytes(status.history.bytes)} / ${formatBytes(status.history.max_bytes)}`}><span>历史内存</span><strong>{formatBytes(status.history.bytes)}</strong><small>/ {formatBytes(status.history.max_bytes)}</small></div>
       </section>
 
-      {status.last_error && <div className="stream-error">{status.last_error}</div>}
+      {status.last_error && <div className="stream-error" title={status.last_error}>{status.last_error}</div>}
 
       <main className="monitor-grid">
         <section className="panel result-visual">
           <div className="panel-heading">
             <div><span className="section-number">01</span><h2>最近完成分析</h2></div>
-            <div className="frame-meta">抽帧 {formatTime(detail?.captured_at ?? null)} · 完成 {formatTime(detail?.completed_at ?? null)}</div>
+            <div className="frame-meta" title={`抽帧 ${formatTime(detail?.captured_at ?? null)} · 完成 ${formatTime(detail?.completed_at ?? null)}`}>抽帧 {formatTime(detail?.captured_at ?? null)} · 完成 {formatTime(detail?.completed_at ?? null)}</div>
           </div>
           <AnnotatedFrame detail={detail} />
         </section>
@@ -864,7 +880,7 @@ export default function App() {
         </section>
 
         <aside className="panel live-preview">
-          <div className="panel-heading"><div><span className="live-dot" /><h2>最新 RTSP 抽帧</h2></div><span>{formatTime(status.last_capture_at)}</span></div>
+          <div className="panel-heading"><div><span className="live-dot" /><h2>最新 RTSP 抽帧</h2></div><span title={formatTime(status.last_capture_at)}>{formatTime(status.last_capture_at)}</span></div>
           {liveUrl ? <img src={liveUrl} alt="最新 RTSP 抽帧" /> : <div className="empty-live">尚无实时画面</div>}
           <p>实时预览不叠加旧分析框，避免帧与结果错配。</p>
         </aside>
@@ -873,7 +889,7 @@ export default function App() {
       <section className="history-section">
         <div className="history-heading">
           <div><span className="section-number">03</span><h2>进程内调试历史</h2></div>
-          <span>最新在前 · 已加载 {history.length} / 内存共 {status.history.items} 帧</span>
+          <span title={`最新在前 · 已加载 ${history.length} / 内存共 ${status.history.items} 帧`}>最新在前 · 已加载 {history.length} / 内存共 {status.history.items} 帧</span>
         </div>
         <div className="history-grid" data-testid="history-grid">
           {history.map((item) => (
@@ -886,21 +902,10 @@ export default function App() {
                 <RiskBadge risk={item.overall_risk} />
               </div>
               <div className="history-info">
-                <strong>{formatTime(item.captured_at)}</strong>
-                <span>{item.provider} · {item.model}</span>
-                <span>{item.analysis
-                  ? `婴儿 ${item.analysis.infants.length} · 成人 ${item.analysis.adult_presence === "unknown" ? "未知" : item.analysis.adults.length} · 猫 ${(item.analysis.cats ?? []).length}`
-                  : "婴儿 — · 成人 — · 猫 —"}</span>
-                <span>
-                  {item.status === "error"
-                    ? "分析失败"
-                    : item.attempts > 1 && item.latency_ms
-                      ? `重试后成功 · 耗时 ${(item.latency_ms / 1000).toFixed(1)}s`
-                    : item.latency_ms
-                      ? `耗时 ${(item.latency_ms / 1000).toFixed(1)}s`
-                      : "分析中"}
-                  {` · 调用 ${item.attempts} 次 · 输入 ${formatTokens(item.input_tokens)} · 输出 ${formatTokens(item.output_tokens)}`}
-                </span>
+                <strong title={formatTime(item.captured_at)}>{formatTime(item.captured_at)}</strong>
+                <span title={`${item.provider} · ${item.model}`}>{item.provider} · {item.model}</span>
+                <span title={historySubjectText(item)}>{historySubjectText(item)}</span>
+                <span title={historyCallText(item)}>{historyCallText(item)}</span>
               </div>
             </button>
           ))}
@@ -917,7 +922,7 @@ export default function App() {
 
       {detail && (
         <section className="debug-section">
-          <div className="history-heading"><div><span className="section-number">04</span><h2>请求审计</h2></div><span>{detail.prompt_version}</span></div>
+          <div className="history-heading"><div><span className="section-number">04</span><h2>请求审计</h2></div><span title={detail.prompt_version}>{detail.prompt_version}</span></div>
           <div className="debug-grid">
             <details open><summary>逐次调用审计</summary><AttemptAudit detail={detail} /></details>
             <details><summary>原始模型响应</summary>{detail.raw_responses.length > 0 ? detail.raw_responses.map((response, index) => {

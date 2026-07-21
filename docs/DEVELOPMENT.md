@@ -29,6 +29,8 @@ Every environment-backed `Settings` default is read when a `Settings()` instance
 
 `RTSP_STALL_TIMEOUT_SECONDS` defaults to 30 seconds and must be a finite positive number. It configures FFmpeg socket I/O timeout and is the baseline for the complete-JPEG watchdog. The effective frame watchdog is `max(RTSP_STALL_TIMEOUT_SECONDS, 3 / fps)`, preventing false reconnects at low sampling rates. A reconnect test must prove watchdog expiry terminates the child process before the backoff state is published.
 
+The production image builds the exact FFmpeg release pinned by `FFMPEG_VERSION` and `FFMPEG_SHA256` in `Dockerfile` from the official `ffmpeg.org` source archive. Do not replace it with an unversioned distribution package. The image build must exercise an RTSP open attempt using the RTSP-native `timeout`/transport options and execute the actual `fps` + `scale` + MJPEG `image2pipe` processing path. Do not use the generic `rw_timeout` for RTSP: FFmpeg 8.1.2 lists it in global protocol help but rejects it when the RTSP demuxer opens the input. An argument-list unit test or help-text grep alone does not prove that the runtime binary accepts an option in the target demuxer context.
+
 For Gemini, either set `GEMINI_API_KEY` in the untracked `.env` or use the page's Gemini Key dialog. A dialog value is validated and kept only in backend process memory; it is not browser-persisted and disappears on restart. Because the MVP has no authentication, configure credentials only over the default loopback binding or trusted HTTPS. Selected frames leave the machine when Gemini is active.
 
 ## Native development

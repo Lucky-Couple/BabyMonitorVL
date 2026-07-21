@@ -31,8 +31,6 @@ def build_ffmpeg_command(
         "-loglevel",
         "warning",
         "-nostdin",
-        "-rw_timeout",
-        str(io_timeout_microseconds),
         "-timeout",
         str(io_timeout_microseconds),
         "-rtsp_transport",

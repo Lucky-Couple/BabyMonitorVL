@@ -29,7 +29,7 @@ cp .env.example .env
 docker compose up --build
 ```
 
-访问 <http://127.0.0.1:8000>。容器已包含 FFmpeg，并通过 `host.docker.internal:11434` 访问宿主机 Ollama。Qwen3-VL 需要 Ollama 0.12.7 或更高版本。
+访问 <http://127.0.0.1:8000>。容器从 FFmpeg 官方源码构建并校验固定的 `8.1.2` 版本，在镜像构建阶段实际执行 RTSP open 参数路径和完整 JPEG 抽帧链路，并通过 `host.docker.internal:11434` 访问宿主机 Ollama。Qwen3-VL 需要 Ollama 0.12.7 或更高版本。
 
 Gemini Key 可以在页面右上角的设置 Dialog 中临时配置，也可以在 `.env` 中提供启动默认值：
 

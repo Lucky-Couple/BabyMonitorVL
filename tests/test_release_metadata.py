@@ -84,6 +84,16 @@ def test_production_server_has_explicit_websocket_ping_policy() -> None:
     assert '"--ws-ping-timeout", "20"' in dockerfile
 
 
+def test_production_ffmpeg_is_pinned_and_command_checked() -> None:
+    dockerfile = (ROOT / "Dockerfile").read_text(encoding="utf-8")
+    assert "ARG FFMPEG_VERSION=8.1.2" in dockerfile
+    assert re.search(r"ARG FFMPEG_SHA256=[0-9a-f]{64}\n", dockerfile)
+    assert '"https://ffmpeg.org/releases/ffmpeg-${FFMPEG_VERSION}.tar.xz"' in dockerfile
+    assert "sha256sum --check --strict" in dockerfile
+    for capability in ("demuxer=rtsp", "rtsp_transport", "compatibility-check", "image2pipe"):
+        assert capability in dockerfile
+
+
 def test_relative_markdown_links_resolve() -> None:
     link_pattern = re.compile(r"\[[^]]+\]\(([^)]+)\)")
     missing: list[str] = []

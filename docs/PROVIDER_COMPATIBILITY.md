@@ -64,6 +64,8 @@ Prefer a provider SDK's native async request API. Wrapping a synchronous HTTP ca
 
 Record every completed response's usage, including failed local validation attempts. Token totals are cost/debug accounting for all calls, not only successful frames.
 
+Treat provider-reported usage as authoritative and preserve modality breakdowns when supplied. Identical input totals across frames are expected when the shared prompt/schema is unchanged and every image has the same dimensions or provider media-resolution bucket: image tokenization is based on the provider's visual token budget/tiling rather than JPEG byte differences. Diagnose suspicious totals from the stored per-attempt usage before changing normalization; output totals should normally vary with generated response length.
+
 ### Treat secrets as provider-owned data
 
 Every provider declares its exact sensitive runtime values through `sensitive_values()`. Sanitize those values before health details, history errors, status, events, or HTTP responses. Test web-supplied credentials separately from environment credentials. A provider replacement must be validated before activation, serialized against session start, memory-only unless explicitly designed otherwise, and closed on rejection or replacement.

@@ -42,10 +42,9 @@ def test_ffmpeg_command_samples_and_scales_without_shell() -> None:
     assert "-rtsp_transport" in command
     assert "fps=1.0" in command[command.index("-vf") + 1]
     assert "1280" in command[command.index("-vf") + 1]
-    assert command[command.index("-rw_timeout") + 1] == "12500000"
     assert command[command.index("-timeout") + 1] == "12500000"
-    assert command.index("-rw_timeout") < command.index("-i")
     assert command.index("-timeout") < command.index("-i")
+    assert "-rw_timeout" not in command
     assert command[-1] == "pipe:1"
 
 

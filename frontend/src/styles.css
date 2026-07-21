@@ -79,11 +79,11 @@ input:disabled, select:disabled { opacity: .58; }
 .cancel-key { border: 1px solid #344250; color: #aeb9c3; background: #0a0f14; }
 .save-key { border: 0; color: #06110f; background: var(--cyan); font-weight: 700; }
 .metrics-grid { display: grid; grid-template-columns: repeat(8, 1fr); border: 1px solid var(--line); border-top: 0; margin: 0 10px; background: #0d1218; }
-.metrics-grid > div { padding: 11px 14px; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
+.metrics-grid > div { min-width: 0; padding: 11px 14px; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
 .metrics-grid > div:last-child { border: 0; }
 .metrics-grid span { font-size: 10px; color: var(--muted); text-transform: uppercase; }
-.metrics-grid strong { font-family: "SFMono-Regular", Consolas, monospace; font-size: 17px; margin-top: 2px; }
-.metrics-grid small { color: var(--muted); font-size: 9px; }
+.metrics-grid strong { font-family: "SFMono-Regular", Consolas, monospace; font-size: 17px; margin-top: 2px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.metrics-grid small { color: var(--muted); font-size: 9px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .stream-error { margin: 12px 0 0; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
 .monitor-grid { display: grid; grid-template-columns: minmax(0, 1.5fr) minmax(300px, .7fr); gap: 14px; margin-top: 14px; }
 .panel { border-radius: 5px; overflow: hidden; min-width: 0; }
@@ -91,7 +91,7 @@ input:disabled, select:disabled { opacity: .58; }
 .panel-heading, .history-heading { display: flex; align-items: center; justify-content: space-between; padding: 13px 15px; border-bottom: 1px solid var(--line); min-height: 53px; }
 .panel-heading > div, .history-heading > div { display: flex; align-items: center; gap: 10px; }
 h2 { font-size: 14px; margin: 0; letter-spacing: .02em; }
-.frame-meta, .panel-heading > span, .history-heading > span { color: var(--muted); font-size: 11px; }
+.frame-meta, .panel-heading > span, .history-heading > span { min-width: 0; color: var(--muted); font-size: 11px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .annotated-frame { position: relative; background: #050709; line-height: 0; width: 100%; max-height: 72vh; }
 .annotated-frame img { display: block; width: 100%; height: 100%; object-fit: fill; }
 .annotated-frame svg { position: absolute; inset: 0; width: 100%; height: 100%; }
