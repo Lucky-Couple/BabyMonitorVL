@@ -54,7 +54,7 @@ async def test_validation_response_does_not_echo_rtsp_credentials(tmp_path) -> N
     async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
         response = await client.post(
             "/api/monitor/start",
-            json={"rtsp_url": f"http://alice:{secret}@camera/stream", "fps": 1},
+            json={"rtsp_url": f"http://alice:{secret}@camera/stream", "min_frame_interval_seconds": 1},
         )
     assert response.status_code == 422
     assert secret not in response.text

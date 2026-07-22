@@ -4,16 +4,22 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [0.3.0] - 2026-07-22
+
 ### Changed
 
 - Excluded every `gemini-2*` model from Google AI Studio model discovery, even when stale capability metadata still advertises content generation.
 - Updated the shared prompt with infrared/night-vision guidance that distinguishes fitted clothing from loose bedding through exposed-leg anchors, body-contour fit, drape, folds, and mattress overflow rather than grayscale color or texture.
-- Promoted the latest unannotated RTSP sample to the primary monitor panel and added sampled resolution, measured/target FPS, and JPEG-pipe data-rate diagnostics with explicit source-resolution/bitrate labeling.
+- Promoted the latest unannotated RTSP sample to the primary monitor panel and added decoded resolution, actual/configured frame interval, and JPEG-pipe data-rate diagnostics with explicit source-resolution/bitrate labeling.
 - Promoted the exact-frame annotated result to a full-width section 03 at its original aspect ratio, with debug history and request audit renumbered to sections 04 and 05.
 - Removed the application-level 1280-pixel FFmpeg resize and its Web control; capture, preview, history, and model requests now preserve the RTSP stream's decoded source resolution unless a future tested model capability requires provider-specific adaptation.
+- Replaced fixed-rate capture and latest-frame overwrite scheduling with demand-driven one-frame RTSP capture: the next frame is acquired only after the current model result finishes.
+- Replaced the public `fps` request/status field with `min_frame_interval_seconds` (`0.1–3600`, default `1`) and made it the sole request-rate limiter measured between logical model-request start times.
+- Removed obsolete capture/drop counters from backend status and the dashboard, and relabeled preview telemetry around effective analysis cadence rather than source-video sampling.
 
 ### Active contract metadata
 
+- Application version: `0.3.0`.
 - Prompt version: `baby-monitor-single-frame-v9-infrared-bedding-geometry`.
 - Analysis schema version: `1.3`.
 

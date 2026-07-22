@@ -28,8 +28,8 @@ interface LiveFrameState {
   capturedAt: string | null;
   width: number | null;
   height: number | null;
-  measuredFps: number | null;
-  previewBitrateKbps: number | null;
+  actualIntervalSeconds: number | null;
+  analysisBitrateKbps: number | null;
 }
 
 function readRtspDraft(): string {
@@ -78,11 +78,9 @@ function isMonitorStatus(value: unknown): value is MonitorStatus {
     "last_error",
   ];
   const counters = [
-    "capture_count",
     "submitted_count",
     "completed_count",
     "error_count",
-    "dropped_count",
     "reconnect_attempt",
     "input_tokens",
     "output_tokens",
@@ -91,7 +89,7 @@ function isMonitorStatus(value: unknown): value is MonitorStatus {
     && states.includes(value.state)
     && (value.provider === null || value.provider === "ollama" || value.provider === "gemini")
     && nullableStrings.every((name) => isNullableString(value[name]))
-    && isNullableNumber(value.fps)
+    && isNullableNumber(value.min_frame_interval_seconds)
     && isNullableNumber(value.last_latency_ms)
     && isNullableNumber(value.reconnect_delay_seconds)
     && counters.every((name) => isNonNegativeNumber(value[name]))
@@ -163,12 +161,10 @@ const emptyStatus: MonitorStatus = {
   source: null,
   provider: null,
   model: null,
-  fps: null,
-  capture_count: 0,
+  min_frame_interval_seconds: null,
   submitted_count: 0,
   completed_count: 0,
   error_count: 0,
-  dropped_count: 0,
   last_capture_at: null,
   last_analysis_at: null,
   last_latency_ms: null,
@@ -200,10 +196,14 @@ function formatTokens(value: number | null | undefined) {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
 
-function formatPreviewBitrate(value: number | null) {
+function formatAnalysisBitrate(value: number | null) {
   if (value === null) return "—";
   if (value >= 1000) return `${(value / 1000).toFixed(2)} Mbps`;
   return `${value.toFixed(0)} kbps`;
+}
+
+function formatFrameInterval(value: number | null | undefined) {
+  return value == null ? "—" : `${value.toFixed(2)}s`;
 }
 
 function historySubjectText(item: HistorySummary) {
@@ -502,7 +502,7 @@ export default function App() {
   const [provider, setProvider] = useState<ProviderName>("ollama");
   const [model, setModel] = useState("qwen3-vl:4b");
   const [rtspUrl, setRtspUrl] = useState(readRtspDraft);
-  const [fps, setFps] = useState(1);
+  const [minFrameIntervalSeconds, setMinFrameIntervalSeconds] = useState(1);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [transport, setTransport] = useState<"tcp" | "udp">("tcp");
   const [error, setError] = useState<string | null>(null);
@@ -591,8 +591,8 @@ export default function App() {
             capturedAt: typeof event.data.captured_at === "string" ? event.data.captured_at : null,
             width: isNonNegativeNumber(event.data.width) ? event.data.width : null,
             height: isNonNegativeNumber(event.data.height) ? event.data.height : null,
-            measuredFps: isNullableNumber(event.data.measured_fps) ? event.data.measured_fps : null,
-            previewBitrateKbps: isNullableNumber(event.data.preview_bitrate_kbps) ? event.data.preview_bitrate_kbps : null,
+            actualIntervalSeconds: isNullableNumber(event.data.actual_interval_seconds) ? event.data.actual_interval_seconds : null,
+            analysisBitrateKbps: isNullableNumber(event.data.analysis_bitrate_kbps) ? event.data.analysis_bitrate_kbps : null,
           });
         }
         if (
@@ -698,7 +698,7 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({
           rtsp_url: rtspUrl,
-          fps,
+          min_frame_interval_seconds: minFrameIntervalSeconds,
           provider,
           model,
           rtsp_transport: transport,
@@ -774,8 +774,8 @@ export default function App() {
             />
           </label>
           <label className="field field-small">
-            <span>FPS</span>
-            <input type="number" min="0.1" max="10" step="0.1" value={fps} onChange={(e) => setFps(Number(e.target.value))} disabled={active} />
+            <span>最小帧间隔（秒）</span>
+            <input type="number" min="0.1" max="3600" step="0.1" value={minFrameIntervalSeconds} onChange={(e) => setMinFrameIntervalSeconds(Number(e.target.value))} disabled={active} />
           </label>
           <label className="field">
             <span>模型后端</span>
@@ -876,12 +876,11 @@ export default function App() {
       </dialog>
 
       <section className="metrics-grid">
-        <div><span>已抽帧</span><strong title={String(status.capture_count)}>{status.capture_count}</strong></div>
         <div><span>已提交</span><strong title={String(status.submitted_count)}>{status.submitted_count}</strong></div>
         <div><span>已完成</span><strong title={String(status.completed_count)}>{status.completed_count}</strong></div>
+        <div><span>失败</span><strong title={String(status.error_count)}>{status.error_count}</strong></div>
         <div><span>累计输入 Token</span><strong title={formatTokens(status.input_tokens)}>{formatTokens(status.input_tokens)}</strong></div>
         <div><span>累计输出 Token</span><strong title={formatTokens(status.output_tokens)}>{formatTokens(status.output_tokens)}</strong></div>
-        <div><span>覆盖丢帧</span><strong title={String(status.dropped_count)}>{status.dropped_count}</strong></div>
         <div><span>最近延迟</span><strong title={status.last_latency_ms ? `${(status.last_latency_ms / 1000).toFixed(1)}s` : "—"}>{status.last_latency_ms ? `${(status.last_latency_ms / 1000).toFixed(1)}s` : "—"}</strong></div>
         <div title={`${formatBytes(status.history.bytes)} / ${formatBytes(status.history.max_bytes)}`}><span>历史内存</span><strong>{formatBytes(status.history.bytes)}</strong><small>/ {formatBytes(status.history.max_bytes)}</small></div>
       </section>
@@ -891,7 +890,7 @@ export default function App() {
       <main className="monitor-grid">
         <section className="panel primary-live">
           <div className="panel-heading">
-            <div><span className="section-number">01</span><span className="live-dot" /><h2>最新 RTSP 抽帧</h2></div>
+            <div><span className="section-number">01</span><span className="live-dot" /><h2>最近即时抽帧</h2></div>
             <div className="frame-meta" title={formatTime(liveFrame?.capturedAt ?? status.last_capture_at)}>{formatTime(liveFrame?.capturedAt ?? status.last_capture_at)}</div>
           </div>
           {liveFrame ? (
@@ -899,10 +898,10 @@ export default function App() {
               className="live-frame"
               style={liveFrame.width && liveFrame.height ? { aspectRatio: `${liveFrame.width} / ${liveFrame.height}` } : undefined}
             >
-              <img src={liveFrame.imageUrl} alt="最新 RTSP 抽帧" />
+              <img src={liveFrame.imageUrl} alt="最近即时抽帧" />
             </div>
           ) : <div className="empty-live">尚无实时画面</div>}
-          <div className="live-debug" aria-label="采样预览调试信息">
+          <div className="live-debug" aria-label="即时捕获调试信息">
             <div>
               <span>RTSP 原始分辨率</span>
               <strong title={liveFrame?.width && liveFrame.height ? `${liveFrame.width} × ${liveFrame.height}` : "—"}>
@@ -910,19 +909,19 @@ export default function App() {
               </strong>
             </div>
             <div>
-              <span>实测 / 目标 FPS</span>
-              <strong title={`${liveFrame?.measuredFps?.toFixed(2) ?? "—"} / ${status.fps?.toFixed(2) ?? "—"}`}>
-                {liveFrame?.measuredFps?.toFixed(2) ?? "—"} / {status.fps?.toFixed(2) ?? "—"}
+              <span>实际 / 设定最小帧间隔</span>
+              <strong title={`${formatFrameInterval(liveFrame?.actualIntervalSeconds)} / ${formatFrameInterval(status.min_frame_interval_seconds)}`}>
+                {formatFrameInterval(liveFrame?.actualIntervalSeconds)} / {formatFrameInterval(status.min_frame_interval_seconds)}
               </strong>
             </div>
             <div>
-              <span>JPEG 预览数据率</span>
-              <strong title={`${formatPreviewBitrate(liveFrame?.previewBitrateKbps ?? null)}；不是摄像头原始编码码率`}>
-                {formatPreviewBitrate(liveFrame?.previewBitrateKbps ?? null)}
+              <span>分析 JPEG 数据率</span>
+              <strong title={`${formatAnalysisBitrate(liveFrame?.analysisBitrateKbps ?? null)}；不是摄像头原始编码码率`}>
+                {formatAnalysisBitrate(liveFrame?.analysisBitrateKbps ?? null)}
               </strong>
             </div>
           </div>
-          <p className="live-note">FFmpeg 保持 RTSP 视频原始宽高，只进行定频抽帧和 JPEG 编码；这里不叠加旧分析框。</p>
+          <p className="live-note">每次模型准备提交请求时才即时连接 RTSP 抓取一帧；模型返回前不会继续抽帧，也不会产生覆盖丢帧。</p>
         </section>
 
         <section className="panel analysis-result">

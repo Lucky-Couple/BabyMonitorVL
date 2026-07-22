@@ -43,7 +43,7 @@ RUN /opt/ffmpeg/bin/ffmpeg -hide_banner -version 2>&1 | grep -F "ffmpeg version 
     && ! printf '%s' "${rtsp_probe}" | grep -F "Option timeout not found" \
     && /opt/ffmpeg/bin/ffmpeg -hide_banner -loglevel error \
         -f lavfi -i "color=size=640x360:rate=2:duration=1" \
-        -vf "fps=1" -frames:v 1 \
+        -frames:v 1 \
         -f image2pipe -vcodec mjpeg /tmp/frame.jpg \
     && test -s /tmp/frame.jpg
 

@@ -135,12 +135,10 @@ export interface MonitorStatus {
   source: string | null;
   provider: ProviderName | null;
   model: string | null;
-  fps: number | null;
-  capture_count: number;
+  min_frame_interval_seconds: number | null;
   submitted_count: number;
   completed_count: number;
   error_count: number;
-  dropped_count: number;
   last_capture_at: string | null;
   last_analysis_at: string | null;
   last_latency_ms: number | null;

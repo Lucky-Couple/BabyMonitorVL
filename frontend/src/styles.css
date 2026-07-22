@@ -78,7 +78,7 @@ input:disabled, select:disabled { opacity: .58; }
 .reset-key { margin-right: auto; border: 1px solid #5d4930; color: #dfbd77; background: #211b13; }
 .cancel-key { border: 1px solid #344250; color: #aeb9c3; background: #0a0f14; }
 .save-key { border: 0; color: #06110f; background: var(--cyan); font-weight: 700; }
-.metrics-grid { display: grid; grid-template-columns: repeat(8, 1fr); border: 1px solid var(--line); border-top: 0; margin: 0 10px; background: #0d1218; }
+.metrics-grid { display: grid; grid-template-columns: repeat(7, 1fr); border: 1px solid var(--line); border-top: 0; margin: 0 10px; background: #0d1218; }
 .metrics-grid > div { min-width: 0; padding: 11px 14px; border-right: 1px solid var(--line); display: flex; flex-direction: column; }
 .metrics-grid > div:last-child { border: 0; }
 .metrics-grid span { font-size: 10px; color: var(--muted); text-transform: uppercase; }

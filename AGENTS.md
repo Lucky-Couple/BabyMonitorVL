@@ -8,11 +8,11 @@ BabyMonitorVL is an experimental, human-reviewed, single-camera visual-language-
 
 The MVP intentionally uses a multimodal LLM/VLM for all semantic visual interpretation. This boundary is non-negotiable unless the product owner explicitly changes it:
 
-- FFmpeg may decode RTSP, sample at a fixed FPS, resize while preserving aspect ratio, and encode JPEG.
+- FFmpeg may connect to RTSP on demand, decode exactly one current frame, preserve its resolution, and encode JPEG.
 - Do not add OpenCV, YOLO, MediaPipe, image classifiers, conventional object detectors, trackers, optical flow, pose estimation, segmentation models, or CV-based temporal smoothing.
 - Do not infer breathing, health, emotion, diagnosis, events outside the current frame, or medical advice.
 - Each inference request contains one still frame. Do not add hidden cross-frame context or tracking.
-- Keep the latest-frame queue at size one. When inference is slower than capture, replace the queued frame and increment the dropped-frame counter; never build an unbounded latency backlog.
+- Do not schedule frames independently of inference. After one model result (including retry handling) completes, enforce the configured minimum frame interval in seconds, then request exactly one fresh frame for the next call. There is no pending-frame queue or dropped-frame counter.
 
 ## Architectural invariants
 
@@ -20,7 +20,7 @@ The MVP intentionally uses a multimodal LLM/VLM for all semantic visual interpre
 - Capture and inference remain separate asynchronous tasks.
 - `latest_capture` is for the unannotated live preview. The annotated result must always use the exact historical JPEG submitted to the model.
 - History is process-memory-only and is pruned only by `HISTORY_MAX_BYTES`. Do not add persistence, a frame-count cap, or a TTL without an explicit product decision and migration note.
-- RTSP reconnect backoff remains bounded exponential backoff: 1, 2, 4, 8, 16, then 30 seconds. Status keeps consecutive `reconnect_attempt` separate from nullable `reconnect_delay_seconds`; never overload the attempt counter with a duration. Preserve the RTSP-native FFmpeg `timeout` and the Python complete-JPEG watchdog so a half-open camera cannot block reconnection indefinitely. Do not add generic `rw_timeout`: FFmpeg may advertise it globally while rejecting it in the RTSP demuxer context. The watchdog interval must account for configured low FPS.
+- RTSP reconnect backoff remains bounded exponential backoff: 1, 2, 4, 8, 16, then 30 seconds. Status keeps consecutive `reconnect_attempt` separate from nullable `reconnect_delay_seconds`; never overload the attempt counter with a duration. Preserve the RTSP-native FFmpeg `timeout` and the Python complete-JPEG watchdog so an on-demand one-frame capture cannot block reconnection indefinitely. Do not add generic `rw_timeout`: FFmpeg may advertise it globally while rejecting it in the RTSP demuxer context.
 - The production container pins and checksum-verifies an official FFmpeg source release. Any FFmpeg command change must pass the Dockerfile's real-binary capability and synthetic image-pipe checks; Python argument-list tests are necessary but insufficient.
 - No audio, push, SMS, email, or audible alarm is part of this MVP.
 - API and UI coordinates are always canonical `[ymin, xmin, ymax, xmax]`, integer normalized to `0..1000`.

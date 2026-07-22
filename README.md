@@ -1,6 +1,6 @@
 # BabyMonitorVL
 
-BabyMonitorVL 是一个使用多模态大语言模型分析 RTSP 婴儿监控画面的 MVP。FFmpeg 只负责解码、定时抽帧和 JPEG 编码；婴儿定位、姿势、口鼻区域遮挡、被子覆盖、成人是否存在以及猫是否进入画面的判断全部来自所选视觉语言模型，不使用 OpenCV、检测器或跟踪器。
+BabyMonitorVL 是一个使用多模态大语言模型分析 RTSP 婴儿监控画面的 MVP。FFmpeg 只负责按模型请求需求连接 RTSP、抓取一帧和 JPEG 编码；婴儿定位、姿势、口鼻区域遮挡、被子覆盖、成人是否存在以及猫是否进入画面的判断全部来自所选视觉语言模型，不使用 OpenCV、检测器或跟踪器。
 
 > 本项目仅供技术演示和人工复核，不是医疗设备、生命安全告警或无人值守监控系统。
 
@@ -8,10 +8,10 @@ BabyMonitorVL 是一个使用多模态大语言模型分析 RTSP 婴儿监控画
 
 ## 功能
 
-- 单路 RTSP，默认每秒抽取 1 帧，可配置 `0.1–10 FPS`。
+- 单路 RTSP；当前模型结果返回后才为下一次请求即时抓帧，可配置 `0.1–3600` 秒的最小帧间隔，默认 1 秒。
 - Ollama 本地模型和 Google AI Studio API 两种实现；云端列表包含兼容的 Gemini 与 Gemma 4 图像输入模型。
-- 单槽 latest-frame 队列：模型慢时覆盖旧的待分析帧，不累积实时延迟。
-- 实时抽帧预览、与结果严格对齐的标注画面、结构化分析和原始响应审计。
+- 无待分析帧队列：模型调用期间不抓取下一帧，因此没有覆盖丢帧或延迟积压。
+- 最近即时抽帧预览、与结果严格对齐的标注画面、结构化分析和原始响应审计。
 - 以口鼻区域而非整个脸部作为遮挡信号，区分无遮挡、部分覆盖、完全覆盖、未直接可见和未知；允许从可见头部几何谨慎估计口鼻位置，但覆盖判断必须有实际遮挡物框与其重叠，且不推断呼吸或医学状态。
 - 在猫咪信号之前独立判断成人是否存在，返回保守的 `present | not_detected | unknown` 状态、成人框、置信度和可见依据，并以粉色框显示。
 - 独立检测画面中的真实家猫，返回猫框、置信度以及与婴儿的距离关系，并在主画面和历史缩略图中叠加紫色框。
@@ -71,13 +71,13 @@ uv run uvicorn babymonitorvl.main:app --host 127.0.0.1 --port 8000
 | `DEFAULT_OLLAMA_MODEL` | `qwen3-vl:4b` | Ollama 默认模型 |
 | `DEFAULT_GEMINI_MODEL` | `gemini-3.5-flash` | Gemini 默认模型 |
 | `MODEL_TIMEOUT_SECONDS` | `60` | 单次模型调用超时，必须为有限正数 |
-| `RTSP_STALL_TIMEOUT_SECONDS` | `30` | FFmpeg 网络 I/O 与完整 JPEG 停滞检测基线；低 FPS 时帧 watchdog 自动放宽 |
+| `RTSP_STALL_TIMEOUT_SECONDS` | `30` | 单次即时捕获的 FFmpeg 网络 I/O 与完整 JPEG 停滞检测上限 |
 | `HISTORY_MAX_BYTES` | `1073741824` | JPEG 和调试 payload 的历史预算，必须大于 0 |
 | `MAX_INFANTS` | `1` | 单帧婴儿数量上限，范围 `1–64` |
 | `MAX_ADULTS` | `4` | 单帧成人数量上限，范围 `1–64` |
 | `FFMPEG_BINARY` | `ffmpeg` | FFmpeg 可执行文件 |
 
-RTSP 地址、FPS、provider、model 和 TCP/UDP 可在页面配置。FFmpeg 保留摄像头流的原始分辨率，只负责定频抽帧和 JPEG 编码。服务同时只运行一个监控会话，停止会话不会清空历史，服务重启会清空。
+RTSP 地址、最小帧间隔（秒）、provider、model 和 TCP/UDP 可在页面配置。FFmpeg 每次只抓取一帧并保留摄像头流的原始分辨率；当前模型结果返回前不会启动下一次捕获。最小帧间隔从相邻两次逻辑模型请求的开始时刻计算，只用于限制请求频率。服务同时只运行一个监控会话，停止会话不会清空历史，服务重启会清空。
 
 ### Bounding box 坐标约定
 

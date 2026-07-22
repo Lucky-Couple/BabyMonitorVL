@@ -16,7 +16,6 @@ from babymonitorvl.monitor import (
     CapturedFrame,
     MonitorService,
     local_validation_correction,
-    offer_latest,
     redact_sensitive_text,
     redact_url,
     utc_now,
@@ -37,29 +36,33 @@ def frame(sequence: int) -> CapturedFrame:
     return CapturedFrame(b"jpeg", utc_now().astimezone(timezone.utc), 10, 10, sequence)
 
 
-def test_latest_frame_queue_replaces_stale_frame() -> None:
-    queue: asyncio.Queue[CapturedFrame] = asyncio.Queue(maxsize=1)
-    assert offer_latest(queue, frame(1)) is False
-    assert offer_latest(queue, frame(2)) is True
-    assert queue.get_nowait().sequence == 2
+def install_capture(service: MonitorService, captured_frame: CapturedFrame) -> None:
+    async def capture(_session_id: str) -> CapturedFrame:
+        return captured_frame
+
+    service._request_capture = capture  # type: ignore[method-assign]
 
 
-def test_capture_telemetry_measures_sampled_jpeg_pipe_over_sliding_window() -> None:
-    telemetry = CaptureTelemetry(window_seconds=3.0)
+def test_capture_telemetry_measures_recent_demand_driven_captures() -> None:
+    telemetry = CaptureTelemetry(max_samples=3)
 
     assert telemetry.observe(10.0, 1000) == (None, None)
-    measured_fps, preview_kbps = telemetry.observe(11.0, 2000)
-    assert measured_fps == pytest.approx(1.0)
-    assert preview_kbps == pytest.approx(16.0)
+    measured_interval_seconds, analysis_kbps = telemetry.observe(11.0, 2000)
+    assert measured_interval_seconds == pytest.approx(1.0)
+    assert analysis_kbps == pytest.approx(16.0)
 
-    measured_fps, preview_kbps = telemetry.observe(13.5, 3000)
-    assert measured_fps == pytest.approx(0.4)
-    assert preview_kbps == pytest.approx(9.6)
+    measured_interval_seconds, analysis_kbps = telemetry.observe(13.5, 3000)
+    assert measured_interval_seconds == pytest.approx(3.5 / 2)
+    assert analysis_kbps == pytest.approx(40 / 3.5)
+
+    measured_interval_seconds, analysis_kbps = telemetry.observe(14.5, 4000)
+    assert measured_interval_seconds == pytest.approx(3.5 / 2)
+    assert analysis_kbps == pytest.approx(16.0)
 
 
 def test_capture_telemetry_rejects_invalid_configuration_and_sizes() -> None:
-    with pytest.raises(ValueError, match="window must be positive"):
-        CaptureTelemetry(window_seconds=0)
+    with pytest.raises(ValueError, match="at least two samples"):
+        CaptureTelemetry(max_samples=1)
     with pytest.raises(ValueError, match="byte count"):
         CaptureTelemetry().observe(1.0, -1)
 
@@ -69,12 +72,24 @@ def test_monitor_status_rejects_unknown_fields_and_invalid_assignments() -> None
     with pytest.raises(ValidationError, match="no_such_attribute"):
         setattr(status, "reconect_delay_seconds", 1)
     with pytest.raises(ValidationError, match="greater than or equal to 0"):
-        status.capture_count = -1
+        status.submitted_count = -1
 
 
 def test_monitor_start_contract_does_not_expose_capture_resizing() -> None:
     properties = MonitorStartRequest.model_json_schema()["properties"]
     assert "max_image_edge" not in properties
+
+
+def test_monitor_start_uses_minimum_frame_interval_seconds_contract() -> None:
+    request = MonitorStartRequest(rtsp_url="rtsp://camera.invalid/stream")
+    assert request.min_frame_interval_seconds == 1.0
+    with pytest.raises(ValidationError, match="min_frame_interval_seconds"):
+        MonitorStartRequest(
+            rtsp_url="rtsp://camera.invalid/stream",
+            min_frame_interval_seconds=0,
+        )
+    with pytest.raises(ValidationError, match="fps"):
+        MonitorStartRequest(rtsp_url="rtsp://camera.invalid/stream", fps=1)
 
 
 class StalledFFmpegProcess:
@@ -98,6 +113,59 @@ class StalledFFmpegProcess:
     def kill(self) -> None:
         self.returncode = -9
         self.stdout.feed_eof()
+
+
+def fake_jpeg(width: int = 32, height: int = 16) -> bytes:
+    return (
+        b"\xff\xd8\xff\xc0\x00\x0b\x08"
+        + height.to_bytes(2, "big")
+        + width.to_bytes(2, "big")
+        + b"\x01\x01\x11\x00\xff\xd9"
+    )
+
+
+class OneFrameFFmpegProcess(StalledFFmpegProcess):
+    def __init__(self, image_bytes: bytes) -> None:
+        super().__init__()
+        self.stdout.feed_data(image_bytes)
+        self.stdout.feed_eof()
+
+
+@pytest.mark.asyncio
+async def test_capture_process_starts_only_on_demand_and_returns_one_fresh_frame(monkeypatch, tmp_path) -> None:
+    process_calls: list[tuple[str, ...]] = []
+
+    async def create_process(*args, **kwargs):
+        process_calls.append(args)
+        return OneFrameFFmpegProcess(fake_jpeg(1920, 1080))
+
+    monkeypatch.setattr(monitor_module.asyncio, "create_subprocess_exec", create_process)
+    service = MonitorService(
+        Settings(frontend_dist=tmp_path, ffmpeg_binary="true"),
+        HistoryStore(1024 * 1024),
+        EventHub(),
+        {},
+    )
+    session_id = "on-demand-capture-session"
+    service._session_id = session_id
+    service._config = MonitorStartRequest(
+        rtsp_url="rtsp://camera.invalid/stream",
+        provider=ProviderName.OLLAMA,
+    )
+    capture_loop = asyncio.create_task(service._capture_loop(session_id))
+    await asyncio.sleep(0)
+    assert process_calls == []
+
+    captured = await asyncio.wait_for(service._request_capture(session_id), timeout=1)
+    assert (captured.width, captured.height) == (1920, 1080)
+    assert len(process_calls) == 1
+    command = process_calls[0]
+    assert "-vf" not in command
+    assert command[command.index("-frames:v") + 1] == "1"
+
+    service._session_id = None
+    capture_loop.cancel()
+    await asyncio.gather(capture_loop, return_exceptions=True)
 
 
 @pytest.mark.asyncio
@@ -126,6 +194,8 @@ async def test_frame_stall_terminates_ffmpeg_and_enters_reconnect(monkeypatch, t
         provider=ProviderName.OLLAMA,
     )
     task = asyncio.create_task(service._capture_loop(session_id))
+    request = asyncio.get_running_loop().create_future()
+    await service._capture_requests.put(request)
 
     async def wait_for_reconnect() -> None:
         while service._status.reconnect_attempt < 1:
@@ -232,6 +302,64 @@ def valid_empty_analysis_result() -> ProviderCallResult:
     )
 
 
+class BlockingBackend(JsonRetryBackend):
+    def __init__(self) -> None:
+        super().__init__()
+        self.first_started = asyncio.Event()
+        self.release_first = asyncio.Event()
+
+    async def analyze(self, request: AnalysisRequest) -> ProviderCallResult:
+        self.prompts.append(request.prompt)
+        if len(self.prompts) == 1:
+            self.first_started.set()
+            await self.release_first.wait()
+        return valid_empty_analysis_result()
+
+
+@pytest.mark.asyncio
+async def test_analysis_requests_fresh_frame_only_after_result_and_respects_minimum_interval(tmp_path) -> None:
+    backend = BlockingBackend()
+    service = MonitorService(
+        Settings(frontend_dist=tmp_path),
+        HistoryStore(1024 * 1024),
+        EventHub(),
+        {ProviderName.OLLAMA: backend},
+    )
+    session_id = "demand-driven-session"
+    service._session_id = session_id
+    service._config = MonitorStartRequest(
+        rtsp_url="rtsp://camera.invalid/stream",
+        min_frame_interval_seconds=0.1,
+        provider=ProviderName.OLLAMA,
+        model="test-model",
+    )
+    service._model = "test-model"
+    capture_times: list[float] = []
+
+    async def capture(_session_id: str) -> CapturedFrame:
+        capture_times.append(asyncio.get_running_loop().time())
+        return frame(len(capture_times))
+
+    service._request_capture = capture  # type: ignore[method-assign]
+    task = asyncio.create_task(service._analysis_loop(session_id))
+    await asyncio.wait_for(backend.first_started.wait(), timeout=1)
+    await asyncio.sleep(0.02)
+    assert len(capture_times) == 1
+
+    backend.release_first.set()
+
+    async def wait_for_second_capture() -> None:
+        while len(capture_times) < 2:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_second_capture(), timeout=1)
+    assert capture_times[1] - capture_times[0] >= 0.08
+
+    service._session_id = None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+
 class ProviderJsonErrorRetryBackend(JsonRetryBackend):
     async def analyze(self, request: AnalysisRequest) -> ProviderCallResult:
         self.prompts.append(request.prompt)
@@ -311,7 +439,7 @@ async def test_analysis_retry_adds_json_validation_correction(tmp_path) -> None:
         model="test-model",
     )
     service._model = "test-model"
-    await service._queue.put(frame(1))
+    install_capture(service, frame(1))
     task = asyncio.create_task(service._analysis_loop(session_id))
 
     async def wait_for_completion() -> None:
@@ -364,7 +492,7 @@ async def test_provider_json_error_retries_without_model_output_correction(tmp_p
         model="test-model",
     )
     service._model = "test-model"
-    await service._queue.put(frame(1))
+    install_capture(service, frame(1))
     task = asyncio.create_task(service._analysis_loop(session_id))
 
     async def wait_for_completion() -> None:
@@ -410,7 +538,7 @@ async def test_empty_scene_normal_risk_is_audited_and_does_not_retry(tmp_path, c
         model="test-model",
     )
     service._model = "test-model"
-    await service._queue.put(frame(1))
+    install_capture(service, frame(1))
     task = asyncio.create_task(service._analysis_loop(session_id))
 
     async def wait_for_completion() -> None:
@@ -455,7 +583,7 @@ async def test_duplicate_boxes_are_dropped_logged_and_audited(tmp_path, caplog) 
         model="test-model",
     )
     service._model = "test-model"
-    await service._queue.put(frame(1))
+    install_capture(service, frame(1))
     task = asyncio.create_task(service._analysis_loop(session_id))
 
     async def wait_for_completion() -> None:

@@ -46,7 +46,7 @@ docker compose config
 docker build --pull -t babymonitorvl:release-candidate .
 ```
 
-The Docker build is also the FFmpeg CLI compatibility gate: it verifies the pinned official release, exercises an actual RTSP open path with the configured RTSP-native timeout/transport options, and executes the capture pipeline's FPS filter, MJPEG encoder, and image-pipe muxer without resizing. Help-text presence alone is not a compatibility check. Do not waive this gate after changing either `Dockerfile` or `build_ffmpeg_command()`.
+The Docker build is also the FFmpeg CLI compatibility gate: it verifies the pinned official release, exercises an actual RTSP open path with the configured RTSP-native timeout/transport options, and executes the capture pipeline's one-frame MJPEG encoder and image-pipe muxer without timed sampling or resizing. Help-text presence alone is not a compatibility check. Do not waive this gate after changing either `Dockerfile` or `build_ffmpeg_command()`.
 
 Run an isolated container test if the native environment is not trusted:
 
@@ -92,7 +92,7 @@ Docker/UI smoke:
 3. Start a safe synthetic/local RTSP source with a mock or explicitly authorized model.
 4. Stall the RTSP source without clean EOF and verify the complete-frame watchdog terminates FFmpeg, publishes reconnect status, and recovers through bounded backoff.
 5. Confirm exact-frame overlay, separate live preview, history image/detail, JSON highlighting, token totals, and stop/restart.
-6. Confirm slow inference increases dropped count rather than queue latency.
+6. Confirm slow inference does not trigger another capture or submission; only after the full result/retry cycle finishes may the next demand-driven frame be acquired. Confirm the configured minimum frame interval is respected between logical request start times.
 
 Real-provider contract smoke is opt-in. Record provider/model/version, prompt version, schema version, whether frames left the machine, latency, token fields, and result. Never commit captured frames or raw household data.
 

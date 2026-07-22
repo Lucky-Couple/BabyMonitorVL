@@ -15,7 +15,6 @@ class FrameReadTimeout(TimeoutError):
 def build_ffmpeg_command(
     binary: str,
     rtsp_url: str,
-    fps: float,
     transport: str,
     io_timeout_seconds: float = 30.0,
 ) -> list[str]:
@@ -33,8 +32,8 @@ def build_ffmpeg_command(
         "-i",
         rtsp_url,
         "-an",
-        "-vf",
-        f"fps={fps}",
+        "-frames:v",
+        "1",
         "-q:v",
         "4",
         "-f",

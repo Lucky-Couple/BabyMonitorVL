@@ -112,41 +112,29 @@ class CapturedFrame:
 
 @dataclass(slots=True)
 class CaptureTelemetry:
-    """Measure the sampled-JPEG pipe, not the camera's source codec bitrate."""
+    """Measure recent demand-driven analysis captures, not source video bitrate."""
 
-    window_seconds: float = 5.0
+    max_samples: int = 10
     samples: deque[tuple[float, int]] = field(default_factory=deque)
 
     def __post_init__(self) -> None:
-        if self.window_seconds <= 0:
-            raise ValueError("capture telemetry window must be positive")
+        if self.max_samples < 2:
+            raise ValueError("capture telemetry requires at least two samples")
 
     def observe(self, observed_at: float, jpeg_bytes: int) -> tuple[float | None, float | None]:
         if jpeg_bytes < 0:
             raise ValueError("JPEG byte count must be non-negative")
         self.samples.append((observed_at, jpeg_bytes))
-        cutoff = observed_at - self.window_seconds
-        while len(self.samples) > 1 and self.samples[0][0] < cutoff:
+        while len(self.samples) > self.max_samples:
             self.samples.popleft()
         if len(self.samples) < 2:
             return None, None
         elapsed = self.samples[-1][0] - self.samples[0][0]
         if elapsed <= 0:
             return None, None
-        measured_fps = (len(self.samples) - 1) / elapsed
-        preview_kbps = sum(size for _, size in list(self.samples)[1:]) * 8 / elapsed / 1000
-        return measured_fps, preview_kbps
-
-
-def offer_latest(queue: asyncio.Queue[CapturedFrame], frame: CapturedFrame) -> bool:
-    """Put a frame without blocking, replacing the queued frame when necessary."""
-    dropped = False
-    if queue.full():
-        with contextlib.suppress(asyncio.QueueEmpty):
-            queue.get_nowait()
-            dropped = True
-    queue.put_nowait(frame)
-    return dropped
+        measured_interval_seconds = elapsed / (len(self.samples) - 1)
+        analysis_kbps = sum(size for _, size in list(self.samples)[1:]) * 8 / elapsed / 1000
+        return measured_interval_seconds, analysis_kbps
 
 
 class MonitorService:
@@ -162,7 +150,7 @@ class MonitorService:
         self.events = events
         self.providers = providers
         self._lock = asyncio.Lock()
-        self._queue: asyncio.Queue[CapturedFrame] = asyncio.Queue(maxsize=1)
+        self._capture_requests: asyncio.Queue[asyncio.Future[CapturedFrame]] = asyncio.Queue(maxsize=1)
         self._capture_task: asyncio.Task[None] | None = None
         self._analysis_task: asyncio.Task[None] | None = None
         self._process: asyncio.subprocess.Process | None = None
@@ -207,7 +195,7 @@ class MonitorService:
             self._session_id = session_id
             self._config = config
             self._model = model
-            self._queue = asyncio.Queue(maxsize=1)
+            self._capture_requests = asyncio.Queue(maxsize=1)
             self._latest_capture = None
             self._status = self._new_status()
             self._status.state = "connecting"
@@ -215,7 +203,7 @@ class MonitorService:
             self._status.source = redact_url(config.rtsp_url)
             self._status.provider = config.provider.value
             self._status.model = model
-            self._status.fps = config.fps
+            self._status.min_frame_interval_seconds = config.min_frame_interval_seconds
             self._capture_task = asyncio.create_task(self._capture_loop(session_id), name="rtsp-capture")
             self._analysis_task = asyncio.create_task(self._analysis_loop(session_id), name="frame-analysis")
         await self._publish_status()
@@ -275,105 +263,126 @@ class MonitorService:
     async def _publish_status(self) -> None:
         await self.events.publish({"type": "status", "data": await self.status()})
 
+    async def _request_capture(self, session_id: str) -> CapturedFrame:
+        """Request exactly one fresh RTSP frame for the next model submission."""
+
+        if self._session_id != session_id:
+            raise asyncio.CancelledError
+        future = asyncio.get_running_loop().create_future()
+        await self._capture_requests.put(future)
+        try:
+            return await future
+        except asyncio.CancelledError:
+            future.cancel()
+            raise
+
     async def _capture_loop(self, session_id: str) -> None:
         assert self._config is not None
         config = self._config
-        reconnect_delay = 1
-        reconnect_attempt = 0
         sequence = 0
         telemetry = CaptureTelemetry()
         try:
             while self._session_id == session_id:
-                self._status.state = "connecting" if reconnect_attempt == 0 else "reconnecting"
-                self._status.reconnect_delay_seconds = None
-                await self._publish_status()
-                command = build_ffmpeg_command(
-                    self.settings.ffmpeg_binary,
-                    config.rtsp_url,
-                    config.fps,
-                    config.rtsp_transport,
-                    self.settings.rtsp_stall_timeout_seconds,
-                )
-                stderr_lines: list[str] = []
-                process: asyncio.subprocess.Process | None = None
-                stderr_task: asyncio.Task[None] | None = None
+                request = await self._capture_requests.get()
+                if request.cancelled():
+                    continue
+                reconnect_delay = 1
+                reconnect_attempt = 0
                 try:
-                    process = await asyncio.create_subprocess_exec(
-                        *command,
-                        stdout=asyncio.subprocess.PIPE,
-                        stderr=asyncio.subprocess.PIPE,
-                    )
-                    self._process = process
-                    assert process.stdout is not None and process.stderr is not None
-                    stderr_task = asyncio.create_task(collect_stderr(process.stderr, stderr_lines))
-                    frame_timeout = max(
-                        self.settings.rtsp_stall_timeout_seconds,
-                        3.0 / config.fps,
-                    )
-                    async for image_bytes in read_mjpeg_frames(process.stdout, frame_timeout):
-                        if self._session_id != session_id:
-                            break
-                        try:
-                            width, height = jpeg_dimensions(image_bytes)
-                        except ValueError as exc:
-                            self._status.last_error = str(exc)
-                            continue
-                        sequence += 1
-                        captured_at = utc_now()
-                        frame = CapturedFrame(image_bytes, captured_at, width, height, sequence)
-                        measured_fps, preview_bitrate_kbps = telemetry.observe(time.monotonic(), len(image_bytes))
-                        self._latest_capture = frame
-                        self._status.state = "streaming"
-                        self._status.capture_count = sequence
-                        self._status.last_capture_at = captured_at.isoformat()
-                        self._status.reconnect_attempt = 0
-                        self._status.reconnect_delay_seconds = None
-                        self._status.last_error = None
-                        reconnect_delay = 1
-                        reconnect_attempt = 0
-                        if offer_latest(self._queue, frame):
-                            self._status.dropped_count += 1
-                        await self.events.publish(
-                            {
-                                "type": "capture",
-                                "data": {
-                                    "sequence": sequence,
-                                    "captured_at": captured_at.isoformat(),
-                                    "image_url": f"/api/live/image?v={sequence}",
-                                    "width": width,
-                                    "height": height,
-                                    "measured_fps": measured_fps,
-                                    "preview_bitrate_kbps": preview_bitrate_kbps,
-                                },
-                            }
+                    while self._session_id == session_id and not request.done():
+                        if reconnect_attempt > 0:
+                            self._status.state = "reconnecting"
+                            self._status.reconnect_delay_seconds = None
+                            await self._publish_status()
+                        elif sequence == 0:
+                            self._status.state = "connecting"
+                            self._status.reconnect_delay_seconds = None
+                            await self._publish_status()
+                        command = build_ffmpeg_command(
+                            self.settings.ffmpeg_binary,
+                            config.rtsp_url,
+                            config.rtsp_transport,
+                            self.settings.rtsp_stall_timeout_seconds,
                         )
-                        await self._publish_status()
-                    await process.wait()
-                except asyncio.CancelledError:
-                    raise
-                except Exception as exc:
-                    stderr_lines.append(str(exc))
-                finally:
-                    if process is not None:
-                        await self._terminate_process(process)
-                    if stderr_task:
-                        stderr_task.cancel()
-                        await asyncio.gather(stderr_task, return_exceptions=True)
-                    if self._process is process:
-                        self._process = None
+                        stderr_lines: list[str] = []
+                        process: asyncio.subprocess.Process | None = None
+                        stderr_task: asyncio.Task[None] | None = None
+                        frame: CapturedFrame | None = None
+                        measured_interval_seconds: float | None = None
+                        capture_bitrate_kbps: float | None = None
+                        try:
+                            process = await asyncio.create_subprocess_exec(
+                                *command,
+                                stdout=asyncio.subprocess.PIPE,
+                                stderr=asyncio.subprocess.PIPE,
+                            )
+                            self._process = process
+                            assert process.stdout is not None and process.stderr is not None
+                            stderr_task = asyncio.create_task(collect_stderr(process.stderr, stderr_lines))
+                            frames = read_mjpeg_frames(
+                                process.stdout,
+                                self.settings.rtsp_stall_timeout_seconds,
+                            )
+                            image_bytes = await anext(frames)
+                            width, height = jpeg_dimensions(image_bytes)
+                            sequence += 1
+                            captured_at = utc_now()
+                            frame = CapturedFrame(image_bytes, captured_at, width, height, sequence)
+                            measured_interval_seconds, capture_bitrate_kbps = telemetry.observe(
+                                time.monotonic(),
+                                len(image_bytes),
+                            )
+                        except asyncio.CancelledError:
+                            raise
+                        except Exception as exc:
+                            stderr_lines.append(str(exc))
+                        finally:
+                            if process is not None:
+                                await self._terminate_process(process)
+                            if stderr_task:
+                                stderr_task.cancel()
+                                await asyncio.gather(stderr_task, return_exceptions=True)
+                            if self._process is process:
+                                self._process = None
 
-                if self._session_id != session_id:
-                    break
-                message = " | ".join(filter(None, stderr_lines[-3:])) or "FFmpeg stream ended"
-                message = message.replace(config.rtsp_url, redact_url(config.rtsp_url))
-                reconnect_attempt += 1
-                self._status.state = "reconnecting"
-                self._status.last_error = message
-                self._status.reconnect_attempt = reconnect_attempt
-                self._status.reconnect_delay_seconds = reconnect_delay
-                await self._publish_status()
-                await asyncio.sleep(reconnect_delay)
-                reconnect_delay = min(reconnect_delay * 2, 30)
+                        if frame is not None:
+                            self._latest_capture = frame
+                            self._status.state = "streaming"
+                            self._status.last_capture_at = frame.captured_at.isoformat()
+                            self._status.reconnect_attempt = 0
+                            self._status.reconnect_delay_seconds = None
+                            self._status.last_error = None
+                            await self.events.publish(
+                                {
+                                    "type": "capture",
+                                    "data": {
+                                        "sequence": sequence,
+                                        "captured_at": frame.captured_at.isoformat(),
+                                        "image_url": f"/api/live/image?v={sequence}",
+                                        "width": frame.width,
+                                        "height": frame.height,
+                                        "actual_interval_seconds": measured_interval_seconds,
+                                        "analysis_bitrate_kbps": capture_bitrate_kbps,
+                                    },
+                                }
+                            )
+                            await self._publish_status()
+                            request.set_result(frame)
+                            break
+
+                        message = " | ".join(filter(None, stderr_lines[-3:])) or "FFmpeg capture ended"
+                        message = message.replace(config.rtsp_url, redact_url(config.rtsp_url))
+                        reconnect_attempt += 1
+                        self._status.state = "reconnecting"
+                        self._status.last_error = message
+                        self._status.reconnect_attempt = reconnect_attempt
+                        self._status.reconnect_delay_seconds = reconnect_delay
+                        await self._publish_status()
+                        await asyncio.sleep(reconnect_delay)
+                        reconnect_delay = min(reconnect_delay * 2, 30)
+                finally:
+                    if not request.done():
+                        request.cancel()
         except asyncio.CancelledError:
             raise
 
@@ -399,8 +408,19 @@ class MonitorService:
             "max_infants": self.settings.max_infants,
             "max_adults": self.settings.max_adults,
         }
+        last_submission_started: float | None = None
         while self._session_id == session_id:
-            frame = await self._queue.get()
+            if last_submission_started is not None:
+                wait_seconds = (
+                    last_submission_started
+                    + config.min_frame_interval_seconds
+                    - time.monotonic()
+                )
+                if wait_seconds > 0:
+                    await asyncio.sleep(wait_seconds)
+            frame = await self._request_capture(session_id)
+            if self._session_id != session_id:
+                raise asyncio.CancelledError
             record = HistoryRecord(
                 id=str(uuid.uuid4()),
                 session_id=session_id,
@@ -432,6 +452,7 @@ class MonitorService:
                 model=model,
                 generation_params=generation_params,
             )
+            last_submission_started = time.monotonic()
             raw_responses: list[str] = []
             errors: list[str] = []
             warnings: list[str] = []

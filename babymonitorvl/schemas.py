@@ -230,12 +230,10 @@ class MonitorStatus(BaseModel):
     source: str | None = None
     provider: Literal["ollama", "gemini"] | None = None
     model: str | None = None
-    fps: float | None = None
-    capture_count: int = Field(default=0, ge=0)
+    min_frame_interval_seconds: float | None = Field(default=None, ge=0.1, le=3600.0)
     submitted_count: int = Field(default=0, ge=0)
     completed_count: int = Field(default=0, ge=0)
     error_count: int = Field(default=0, ge=0)
-    dropped_count: int = Field(default=0, ge=0)
     last_capture_at: str | None = None
     last_analysis_at: str | None = None
     last_latency_ms: float | None = Field(default=None, ge=0)
@@ -252,7 +250,7 @@ class MonitorStartRequest(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     rtsp_url: str = Field(min_length=1, max_length=4096)
-    fps: float = Field(default=1.0, ge=0.1, le=10.0)
+    min_frame_interval_seconds: float = Field(default=1.0, ge=0.1, le=3600.0)
     provider: ProviderName = ProviderName.OLLAMA
     model: str | None = Field(default=None, max_length=256)
     rtsp_transport: Literal["tcp", "udp"] = "tcp"
