@@ -4,6 +4,37 @@ All notable changes to this project are documented here. The format follows Keep
 
 ## [Unreleased]
 
+## [0.3.5] - 2026-07-23
+
+### Added
+
+- Added a separate temporal stabilization layer over validated VLM structures, with configurable `3-of-5` confirmation, three-frame clear hysteresis, same-category IoU association, EMA box smoothing, and bounded in-memory alarm timeline.
+- Added `/api/alarm`, `alarm_updated` WebSocket events, per-history-record stabilized snapshots, stable subject/object presence signals, and explicit raw-versus-stabilized risk audit data.
+- Added a prominent browser alarm panel, stable reason and subject/object indicators, compact raw/stable risk timeline, and a stable-box versus raw-box overlay switch.
+
+### Changed
+
+- Narrowly expanded the product boundary to permit deterministic temporal filtering of already-validated structured VLM output. Raw `FrameAnalysis`, raw boxes, provider responses, and single-frame history remain unchanged and available for debugging.
+- The browser now presents an experimental visual alarm signal for human review, but still provides no audible alarm, external notification, medical guarantee, fail-safe behavior, or unattended-monitoring guarantee.
+- Replaced raw/ambiguous RTSP failure strings with categorized operator messages for authentication, permission, missing streams, refused/timed-out connections, DNS failures, stalled frames, and invalid video, while retaining bounded redacted FFmpeg diagnostics.
+- Made frontend API error parsing handle FastAPI string, object, and validation-array details without rendering `[object Object]`; clarified unknown stable states as missing, unreliable, or not-yet-confirmed infant information.
+- Updated the shared prompt with an explicit numeric mouth/nose-to-object rectangle-intersection preflight and consistent blanket-state mapping, preventing body-only or below-face bedding boxes from claiming mouth/nose coverage.
+- Added stable targeted retry guidance for mouth/nose spatial-grounding failures so Gemma-class models receive the violated geometry rule instead of only a generic Pydantic `value_error`.
+- Replaced inference-cadence still-image preview with one source-cadence continuous FFmpeg/MJPEG pipeline shared by the browser and sequential model sampling. Preview-only frames remain ephemeral and never form an analysis queue.
+- Made “最近完成分析” default to exact single-frame raw boxes while retaining the explicit stable-box switch.
+- Updated live diagnostics to show decoded RTSP frame resolution, measured preview FPS, preview-JPEG byte rate, and the independent model minimum frame interval.
+- Changed alarm WebSocket handling to append the current snapshot as one bounded timeline point, reserving full `/api/alarm` downloads for initial load and reconnection instead of refetching the complete timeline after every analysis.
+- Removed unchanged alarm snapshots from periodic live-preview status events, while retaining status publication on connection/reconnection recovery.
+- Marked the preserved alarm snapshot as a desaturated previous-session result whenever monitoring is stopped.
+- Added sanitized real-provider compatibility evidence for the stricter mouth/nose prompt/validation path, including first-call success and retry counts without retaining source details, images, or raw household output.
+- Expanded backend/TypeScript contract-sync checks across alarm reasons, timeline/state, attempt audit, history summary, and history detail; corrected the detail type so it no longer claims summary-only derived fields that the API does not return.
+
+### Release metadata
+
+- Application version: `0.3.5`.
+- Prompt version: `baby-monitor-single-frame-v10-mouth-nose-spatial-preflight`.
+- Analysis schema version: `1.3`.
+
 ## [0.3.0] - 2026-07-22
 
 ### Changed

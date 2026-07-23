@@ -7,9 +7,14 @@ from pydantic import BaseModel
 
 from babymonitorvl.schemas import (
     AdultPresence,
+    AlarmState,
+    AlarmTimelinePoint,
+    AnalysisAttempt,
     BlanketCoverage,
     CatProximity,
     FrameAnalysis,
+    HistoryItem,
+    HistorySummary,
     HistoryStats,
     ImageQuality,
     MonitorStatus,
@@ -19,6 +24,13 @@ from babymonitorvl.schemas import (
     ProviderName,
     RelatedObjectKind,
     RiskLevel,
+    StabilizedSnapshot,
+    StableAlarmReason,
+    StableObject,
+    StableObjectCategory,
+    StableSignal,
+    StableSignalState,
+    StabilityPhase,
 )
 
 
@@ -69,6 +81,9 @@ def typescript_optional_interface_fields(name: str) -> set[str]:
         (ObjectRelation, "ObjectRelation"),
         (CatProximity, "CatProximity"),
         (AdultPresence, "AdultPresence"),
+        (StabilityPhase, "StabilityPhase"),
+        (StableSignalState, "StableSignalState"),
+        (StableObjectCategory, "StableObjectCategory"),
     ],
 )
 def test_frontend_enum_union_matches_backend(
@@ -83,6 +98,15 @@ def test_frontend_enum_union_matches_backend(
         (FrameAnalysis, "FrameAnalysis"),
         (HistoryStats, "HistoryStats"),
         (MonitorStatus, "MonitorStatus"),
+        (AnalysisAttempt, "AnalysisAttempt"),
+        (StableObject, "StableObject"),
+        (StableSignal, "StableSignal"),
+        (StableAlarmReason, "StableAlarmReason"),
+        (StabilizedSnapshot, "StabilizedSnapshot"),
+        (AlarmTimelinePoint, "AlarmTimelinePoint"),
+        (AlarmState, "AlarmState"),
+        (HistorySummary, "HistorySummary"),
+        (HistoryItem, "HistoryDetail"),
     ],
 )
 def test_frontend_interface_fields_match_backend(
@@ -100,3 +124,26 @@ def test_frame_analysis_required_fields_remain_required_in_frontend() -> None:
     required = set(FrameAnalysis.model_json_schema()["required"])
     assert required == typescript_interface_fields("FrameAnalysis")
     assert typescript_optional_interface_fields("FrameAnalysis") == set()
+
+
+def test_frontend_defaults_latest_analysis_to_raw_boxes_and_uses_live_mjpeg() -> None:
+    app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+    assert 'useState<"stable" | "raw">("raw")' in app_source
+    assert "实时 RTSP 预览" in app_source
+    assert "preview_fps" in app_source
+    assert "preview_bitrate_kbps" in app_source
+    assert "actual_interval_seconds" not in app_source
+    assert "analysis_bitrate_kbps" not in app_source
+
+
+def test_frontend_alarm_events_append_timeline_without_full_refetch() -> None:
+    app_source = (ROOT / "frontend" / "src" / "App.tsx").read_text(encoding="utf-8")
+    handler = re.search(
+        r'if \(event\.type === "alarm_updated"(.*?)\n\s{8}\}',
+        app_source,
+        flags=re.DOTALL,
+    )
+    assert handler is not None
+    assert "mergeAlarmSnapshot" in handler.group(1)
+    assert "fetchAlarm" not in handler.group(1)
+    assert "监控已停止，以下为上次会话保留结果" in app_source

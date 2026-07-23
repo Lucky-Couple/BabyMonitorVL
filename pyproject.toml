@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "babymonitorvl"
-version = "0.3.0"
+version = "0.3.5"
 description = "LLM-only RTSP baby monitor MVP"
 readme = "README.md"
 license = "MIT"

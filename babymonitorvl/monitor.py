@@ -9,6 +9,7 @@ import shutil
 import time
 import uuid
 from collections import deque
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
@@ -27,12 +28,19 @@ from .coordinates import (
     parse_model_analysis_with_repairs,
 )
 from .events import EventHub
-from .ffmpeg import build_ffmpeg_command, collect_stderr, jpeg_dimensions, read_mjpeg_frames
+from .ffmpeg import (
+    build_ffmpeg_command,
+    collect_stderr,
+    describe_rtsp_failure,
+    jpeg_dimensions,
+    read_mjpeg_frames,
+)
 from .history import HistoryRecord, HistoryStore
 from .prompt import PROMPT_VERSION, build_prompt, output_schema
 from .providers import AnalysisRequest, VisionBackend
 from .providers.base import aggregate_usage, should_retry_provider_error, token_count
 from .schemas import (
+    AlarmState,
     AnalysisAttempt,
     FrameAnalysis,
     HistoryStats,
@@ -40,9 +48,11 @@ from .schemas import (
     MonitorStatus,
     ProviderName,
 )
+from .stabilizer import StabilizerConfig, TemporalStabilizer
 
 
 logger = logging.getLogger(__name__)
+RTSP_URL_IN_TEXT = re.compile(r"rtsps?://[^\s|]+", re.IGNORECASE)
 
 
 def utc_now() -> datetime:
@@ -75,6 +85,22 @@ def redact_sensitive_text(value: str, secrets: tuple[str, ...]) -> str:
     return result
 
 
+def redact_rtsp_error_text(value: str, configured_url: str) -> str:
+    """Redact configured and incidental RTSP URLs from provider/FFmpeg diagnostics."""
+
+    result = value.replace(configured_url, redact_url(configured_url))
+
+    def replace_url(match: re.Match[str]) -> str:
+        candidate = match.group(0)
+        trailing = ""
+        while candidate and candidate[-1] in ".,;)]}":
+            trailing = candidate[-1] + trailing
+            candidate = candidate[:-1]
+        return redact_url(candidate) + trailing
+
+    return RTSP_URL_IN_TEXT.sub(replace_url, result)
+
+
 def local_validation_correction(exc: Exception) -> str | None:
     """Describe local model-output failures without copying raw output into prompts."""
 
@@ -88,9 +114,56 @@ def local_validation_correction(exc: Exception) -> str | None:
         issues = []
         for item in exc.errors(include_input=False):
             location = ".".join(str(part) for part in item.get("loc", ())) or "root"
-            issues.append(f"{location}:{item.get('type', 'invalid')}")
+            message = str(item.get("msg", ""))
+            if (
+                "partially_covered requires a grounded related object" in message
+                or "fully_covered requires a grounded related object" in message
+            ):
+                issue = "mouth_nose_spatial_grounding"
+            elif "mouth_nose_box is required for clear, partially_covered, or fully_covered" in message:
+                issue = "mouth_nose_box_required"
+            else:
+                issue = str(item.get("type", "invalid"))
+            issues.append(f"{location}:{issue}")
         return ", ".join(issues[:8])
     return None
+
+
+def validation_correction_prompt(baseline_prompt: str, correction: str) -> str:
+    """Build a fixed, raw-output-free retry prompt with targeted local guidance."""
+
+    targeted_guidance = ""
+    if "mouth_nose_spatial_grounding" in correction:
+        targeted_guidance = (
+            " The failed mouth/nose coverage claim had no matching related-object box with "
+            "positive-area intersection. Recompute the two returned rectangles before selecting "
+            "the state: max(mouth_ymin, object_ymin) < min(mouth_ymax, object_ymax) AND "
+            "max(mouth_xmin, object_xmin) < min(mouth_xmax, object_xmax) must both be true. "
+            "If either test is false, do not return partially_covered or fully_covered and do not "
+            "use a covering relation; choose clear, not_visible, or unknown from visible evidence. "
+            "A nearby blanket below the face does not cover the mouth/nose."
+        )
+    elif "mouth_nose_box_required" in correction:
+        targeted_guidance = (
+            " A clear, partially_covered, or fully_covered state requires a non-null tight "
+            "mouth_nose_box. If the region cannot be localized, return not_visible or unknown."
+        )
+
+    return (
+        baseline_prompt
+        + "\n\nVALIDATION CORRECTION: The previous output failed local response "
+        + f"validation ({correction}). Return exactly one valid JSON object, include every "
+        + "required key, and obey all enum and box constraints."
+        + targeted_guidance
+        + " Always return adult_presence and adults; adult_presence=present requires at "
+        + "least one adult observation, and adults=[] when it is not_detected or unknown. "
+        + "For every infant, always return mouth_nose_box and mouth_nose_occlusion; "
+        + "partial/full coverage requires a boxed related object whose box overlaps "
+        + "mouth_nose_box and has a matching relation; use not_visible or unknown "
+        + "instead of inventing coverage. "
+        + "Always return cats; use cats=[] when no real cat is clearly visible. "
+        + "If no infant is visible, use infants=[] and overall_risk=unknown."
+    )
 
 
 def version_at_least(version: str | None, minimum: tuple[int, int, int]) -> bool:
@@ -112,9 +185,9 @@ class CapturedFrame:
 
 @dataclass(slots=True)
 class CaptureTelemetry:
-    """Measure recent demand-driven analysis captures, not source video bitrate."""
+    """Measure recent continuous MJPEG preview cadence and encoded byte rate."""
 
-    max_samples: int = 10
+    max_samples: int = 60
     samples: deque[tuple[float, int]] = field(default_factory=deque)
 
     def __post_init__(self) -> None:
@@ -132,9 +205,9 @@ class CaptureTelemetry:
         elapsed = self.samples[-1][0] - self.samples[0][0]
         if elapsed <= 0:
             return None, None
-        measured_interval_seconds = elapsed / (len(self.samples) - 1)
-        analysis_kbps = sum(size for _, size in list(self.samples)[1:]) * 8 / elapsed / 1000
-        return measured_interval_seconds, analysis_kbps
+        preview_fps = (len(self.samples) - 1) / elapsed
+        preview_bitrate_kbps = sum(size for _, size in list(self.samples)[1:]) * 8 / elapsed / 1000
+        return preview_fps, preview_bitrate_kbps
 
 
 class MonitorService:
@@ -150,7 +223,7 @@ class MonitorService:
         self.events = events
         self.providers = providers
         self._lock = asyncio.Lock()
-        self._capture_requests: asyncio.Queue[asyncio.Future[CapturedFrame]] = asyncio.Queue(maxsize=1)
+        self._frame_condition = asyncio.Condition()
         self._capture_task: asyncio.Task[None] | None = None
         self._analysis_task: asyncio.Task[None] | None = None
         self._process: asyncio.subprocess.Process | None = None
@@ -158,6 +231,16 @@ class MonitorService:
         self._config: MonitorStartRequest | None = None
         self._model: str | None = None
         self._latest_capture: CapturedFrame | None = None
+        self.stabilizer = TemporalStabilizer(
+            StabilizerConfig(
+                window_size=settings.stability_window_size,
+                confirmation_frames=settings.stability_confirmation_frames,
+                clear_frames=settings.stability_clear_frames,
+                box_iou_threshold=settings.stability_box_iou_threshold,
+                box_ema_alpha=settings.stability_box_ema_alpha,
+                timeline_max_points=settings.stability_timeline_max_points,
+            )
+        )
         self._status = self._new_status()
 
     @staticmethod
@@ -195,7 +278,6 @@ class MonitorService:
             self._session_id = session_id
             self._config = config
             self._model = model
-            self._capture_requests = asyncio.Queue(maxsize=1)
             self._latest_capture = None
             self._status = self._new_status()
             self._status.state = "connecting"
@@ -204,6 +286,7 @@ class MonitorService:
             self._status.provider = config.provider.value
             self._status.model = model
             self._status.min_frame_interval_seconds = config.min_frame_interval_seconds
+            self._status.alarm = self.stabilizer.start_session(session_id)
             self._capture_task = asyncio.create_task(self._capture_loop(session_id), name="rtsp-capture")
             self._analysis_task = asyncio.create_task(self._analysis_loop(session_id), name="frame-analysis")
         await self._publish_status()
@@ -236,6 +319,8 @@ class MonitorService:
             self._analysis_task = None
             process = self._process
             self._process = None
+        async with self._frame_condition:
+            self._frame_condition.notify_all()
         if process is not None:
             await self._terminate_process(process)
         if tasks:
@@ -255,139 +340,192 @@ class MonitorService:
 
     async def status(self) -> dict[str, Any]:
         self._status.history = HistoryStats.model_validate(await self.history.stats())
+        self._status.alarm = self.stabilizer.state().current
         return self._status.model_dump(mode="json")
+
+    def alarm_state(self) -> AlarmState:
+        return self.stabilizer.state()
 
     async def latest_image(self) -> CapturedFrame | None:
         return self._latest_capture
+
+    def live_stream(self, session_id: str | None = None) -> AsyncIterator[bytes] | None:
+        """Return one shared-camera MJPEG stream for the requested active session."""
+
+        active_session_id = self._session_id
+        if active_session_id is None or (
+            session_id is not None and session_id != active_session_id
+        ):
+            return None
+        return self._mjpeg_stream(active_session_id)
+
+    async def _mjpeg_stream(self, session_id: str) -> AsyncIterator[bytes]:
+        last_sequence = 0
+        while self._session_id == session_id:
+            async with self._frame_condition:
+                await self._frame_condition.wait_for(
+                    lambda: self._session_id != session_id
+                    or (
+                        self._latest_capture is not None
+                        and self._latest_capture.sequence > last_sequence
+                    )
+                )
+                if self._session_id != session_id or self._latest_capture is None:
+                    return
+                frame = self._latest_capture
+            last_sequence = frame.sequence
+            yield (
+                b"--frame\r\n"
+                b"Content-Type: image/jpeg\r\n"
+                + f"Content-Length: {len(frame.image_bytes)}\r\n\r\n".encode("ascii")
+                + frame.image_bytes
+                + b"\r\n"
+            )
 
     async def _publish_status(self) -> None:
         await self.events.publish({"type": "status", "data": await self.status()})
 
     async def _request_capture(self, session_id: str) -> CapturedFrame:
-        """Request exactly one fresh RTSP frame for the next model submission."""
+        """Wait for the first continuously decoded frame after this model request point."""
 
         if self._session_id != session_id:
             raise asyncio.CancelledError
-        future = asyncio.get_running_loop().create_future()
-        await self._capture_requests.put(future)
-        try:
-            return await future
-        except asyncio.CancelledError:
-            future.cancel()
-            raise
+        async with self._frame_condition:
+            baseline_sequence = self._latest_capture.sequence if self._latest_capture else 0
+            await self._frame_condition.wait_for(
+                lambda: self._session_id != session_id
+                or (
+                    self._latest_capture is not None
+                    and self._latest_capture.sequence > baseline_sequence
+                )
+            )
+            if self._session_id != session_id or self._latest_capture is None:
+                raise asyncio.CancelledError
+            return self._latest_capture
 
     async def _capture_loop(self, session_id: str) -> None:
         assert self._config is not None
         config = self._config
         sequence = 0
-        telemetry = CaptureTelemetry()
+        reconnect_delay = 1
+        reconnect_attempt = 0
+        last_metadata_publish = 0.0
         try:
             while self._session_id == session_id:
-                request = await self._capture_requests.get()
-                if request.cancelled():
-                    continue
-                reconnect_delay = 1
-                reconnect_attempt = 0
-                try:
-                    while self._session_id == session_id and not request.done():
-                        if reconnect_attempt > 0:
-                            self._status.state = "reconnecting"
-                            self._status.reconnect_delay_seconds = None
-                            await self._publish_status()
-                        elif sequence == 0:
-                            self._status.state = "connecting"
-                            self._status.reconnect_delay_seconds = None
-                            await self._publish_status()
-                        command = build_ffmpeg_command(
-                            self.settings.ffmpeg_binary,
-                            config.rtsp_url,
-                            config.rtsp_transport,
-                            self.settings.rtsp_stall_timeout_seconds,
-                        )
-                        stderr_lines: list[str] = []
-                        process: asyncio.subprocess.Process | None = None
-                        stderr_task: asyncio.Task[None] | None = None
-                        frame: CapturedFrame | None = None
-                        measured_interval_seconds: float | None = None
-                        capture_bitrate_kbps: float | None = None
-                        try:
-                            process = await asyncio.create_subprocess_exec(
-                                *command,
-                                stdout=asyncio.subprocess.PIPE,
-                                stderr=asyncio.subprocess.PIPE,
-                            )
-                            self._process = process
-                            assert process.stdout is not None and process.stderr is not None
-                            stderr_task = asyncio.create_task(collect_stderr(process.stderr, stderr_lines))
-                            frames = read_mjpeg_frames(
-                                process.stdout,
-                                self.settings.rtsp_stall_timeout_seconds,
-                            )
-                            image_bytes = await anext(frames)
-                            width, height = jpeg_dimensions(image_bytes)
-                            sequence += 1
-                            captured_at = utc_now()
-                            frame = CapturedFrame(image_bytes, captured_at, width, height, sequence)
-                            measured_interval_seconds, capture_bitrate_kbps = telemetry.observe(
-                                time.monotonic(),
-                                len(image_bytes),
-                            )
-                        except asyncio.CancelledError:
-                            raise
-                        except Exception as exc:
-                            stderr_lines.append(str(exc))
-                        finally:
-                            if process is not None:
-                                await self._terminate_process(process)
-                            if stderr_task:
-                                stderr_task.cancel()
-                                await asyncio.gather(stderr_task, return_exceptions=True)
-                            if self._process is process:
-                                self._process = None
+                if reconnect_attempt > 0:
+                    self._status.state = "reconnecting"
+                    self._status.reconnect_delay_seconds = None
+                else:
+                    self._status.state = "connecting"
+                    self._status.reconnect_delay_seconds = None
+                await self._publish_status()
 
-                        if frame is not None:
+                command = build_ffmpeg_command(
+                    self.settings.ffmpeg_binary,
+                    config.rtsp_url,
+                    config.rtsp_transport,
+                    self.settings.rtsp_stall_timeout_seconds,
+                )
+                stderr_lines: list[str] = []
+                process: asyncio.subprocess.Process | None = None
+                stderr_task: asyncio.Task[None] | None = None
+                telemetry = CaptureTelemetry()
+                try:
+                    process = await asyncio.create_subprocess_exec(
+                        *command,
+                        stdout=asyncio.subprocess.PIPE,
+                        stderr=asyncio.subprocess.PIPE,
+                    )
+                    self._process = process
+                    assert process.stdout is not None and process.stderr is not None
+                    stderr_task = asyncio.create_task(collect_stderr(process.stderr, stderr_lines))
+                    frames = read_mjpeg_frames(
+                        process.stdout,
+                        self.settings.rtsp_stall_timeout_seconds,
+                    )
+                    async for image_bytes in frames:
+                        width, height = jpeg_dimensions(image_bytes)
+                        sequence += 1
+                        observed_at = time.monotonic()
+                        frame = CapturedFrame(image_bytes, utc_now(), width, height, sequence)
+                        preview_fps, preview_bitrate_kbps = telemetry.observe(
+                            observed_at,
+                            len(image_bytes),
+                        )
+                        async with self._frame_condition:
                             self._latest_capture = frame
-                            self._status.state = "streaming"
-                            self._status.last_capture_at = frame.captured_at.isoformat()
-                            self._status.reconnect_attempt = 0
-                            self._status.reconnect_delay_seconds = None
-                            self._status.last_error = None
+                            self._frame_condition.notify_all()
+
+                        recovered = self._status.state != "streaming"
+                        self._status.state = "streaming"
+                        self._status.last_capture_at = frame.captured_at.isoformat()
+                        self._status.reconnect_attempt = 0
+                        self._status.reconnect_delay_seconds = None
+                        self._status.last_error = None
+                        reconnect_attempt = 0
+                        reconnect_delay = 1
+                        if recovered or observed_at - last_metadata_publish >= 1:
+                            last_metadata_publish = observed_at
                             await self.events.publish(
                                 {
                                     "type": "capture",
                                     "data": {
                                         "sequence": sequence,
                                         "captured_at": frame.captured_at.isoformat(),
-                                        "image_url": f"/api/live/image?v={sequence}",
+                                        "image_url": f"/api/live/stream?session_id={session_id}",
                                         "width": frame.width,
                                         "height": frame.height,
-                                        "actual_interval_seconds": measured_interval_seconds,
-                                        "analysis_bitrate_kbps": capture_bitrate_kbps,
+                                        "preview_fps": preview_fps,
+                                        "preview_bitrate_kbps": preview_bitrate_kbps,
                                     },
                                 }
                             )
+                        if recovered:
                             await self._publish_status()
-                            request.set_result(frame)
-                            break
 
-                        message = " | ".join(filter(None, stderr_lines[-3:])) or "FFmpeg capture ended"
-                        message = message.replace(config.rtsp_url, redact_url(config.rtsp_url))
-                        reconnect_attempt += 1
-                        self._status.state = "reconnecting"
-                        self._status.last_error = message
-                        self._status.reconnect_attempt = reconnect_attempt
-                        self._status.reconnect_delay_seconds = reconnect_delay
-                        await self._publish_status()
-                        await asyncio.sleep(reconnect_delay)
-                        reconnect_delay = min(reconnect_delay * 2, 30)
+                    if self._session_id == session_id:
+                        stderr_lines.append("End of file before the next complete JPEG frame")
+                except asyncio.CancelledError:
+                    raise
+                except Exception as exc:
+                    stderr_lines.append(str(exc))
                 finally:
-                    if not request.done():
-                        request.cancel()
+                    if process is not None:
+                        await self._terminate_process(process)
+                    if stderr_task:
+                        try:
+                            await asyncio.wait_for(stderr_task, timeout=0.5)
+                        except asyncio.TimeoutError:
+                            stderr_task.cancel()
+                        await asyncio.gather(stderr_task, return_exceptions=True)
+                    if self._process is process:
+                        self._process = None
+
+                if self._session_id != session_id:
+                    return
+                message = describe_rtsp_failure(
+                    stderr_lines[-6:],
+                    self.settings.rtsp_stall_timeout_seconds,
+                )
+                message = redact_rtsp_error_text(message, config.rtsp_url)
+                reconnect_attempt += 1
+                self._status.state = "reconnecting"
+                self._status.last_error = message
+                self._status.reconnect_attempt = reconnect_attempt
+                self._status.reconnect_delay_seconds = reconnect_delay
+                await self._publish_status()
+                await asyncio.sleep(reconnect_delay)
+                reconnect_delay = min(reconnect_delay * 2, 30)
         except asyncio.CancelledError:
             raise
 
     async def _analysis_loop(self, session_id: str) -> None:
         assert self._config is not None and self._model is not None
+        current_alarm = self.stabilizer.state().current
+        if current_alarm is None or current_alarm.session_id != session_id:
+            # Normal starts initialize the stabilizer in start(). This guard also keeps
+            # direct scheduler harnesses and restored session orchestration deterministic.
+            self._status.alarm = self.stabilizer.start_session(session_id)
         config = self._config
         model = self._model
         provider = self.providers[config.provider]
@@ -550,19 +688,7 @@ class MonitorService:
                                 mime_type=request.mime_type,
                                 width=request.width,
                                 height=request.height,
-                                prompt=(
-                                    prompt + "\n\nVALIDATION CORRECTION: The previous output failed local response "
-                                    + f"validation ({correction}). Return exactly one valid JSON object, include every "
-                                    + "required key, and obey all enum and box constraints. "
-                                    + "Always return adult_presence and adults; adult_presence=present requires at "
-                                    + "least one adult observation, and adults=[] when it is not_detected or unknown. "
-                                    + "For every infant, always return mouth_nose_box and mouth_nose_occlusion; "
-                                    + "partial/full coverage requires a boxed related object whose box overlaps "
-                                    + "mouth_nose_box and has a matching relation; use not_visible or unknown "
-                                    + "instead of inventing coverage. "
-                                    + "Always return cats; use cats=[] when no real cat is clearly visible. "
-                                    + "If no infant is visible, use infants=[] and overall_risk=unknown."
-                                ),
+                                prompt=validation_correction_prompt(prompt, correction),
                                 output_schema=request.output_schema,
                                 model=request.model,
                                 generation_params=request.generation_params,
@@ -571,10 +697,17 @@ class MonitorService:
                 if self._session_id != session_id:
                     raise asyncio.CancelledError
                 if analysis is not None:
+                    stabilized = self.stabilizer.observe(
+                        session_id=session_id,
+                        record_id=record.id,
+                        observed_at=utc_now(),
+                        analysis=analysis,
+                    )
                     updated = await self.history.update(
                         record.id,
                         status="success",
                         analysis=analysis,
+                        stabilized=stabilized,
                         raw_responses=raw_responses,
                         errors=errors,
                         warnings=warnings,
@@ -588,6 +721,13 @@ class MonitorService:
                     self._status.last_latency_ms = round(latency_ms, 1)
                     self._status.last_record_id = record.id
                     self._status.last_error = None
+                    self._status.alarm = stabilized
+                    await self.events.publish(
+                        {
+                            "type": "alarm_updated",
+                            "data": stabilized.model_dump(mode="json"),
+                        }
+                    )
                     await self.events.publish(
                         {
                             "type": "analysis_completed",

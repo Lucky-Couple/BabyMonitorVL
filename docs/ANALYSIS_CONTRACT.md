@@ -66,11 +66,13 @@ Out-of-range, reversed, missing, non-integer, or enum-invalid data is a validati
 
 The runtime subject limits default to one infant and four adults and are configurable through `MAX_INFANTS` and `MAX_ADULTS`. The configured values appear in the full shared prompt and schema. Ollama receives those `maxItems` constraints directly. Gemini's smoke-validated compact transport schema omits `maxItems`, so local validation enforces the same limits after generation.
 
-After canonical coordinate conversion, exact coordinate duplicates within the same semantic category are the only allowed post-processing exception. The first observation/box is retained and later identical boxes are removed. Infant, adult, and cat duplicates remove the later full observation; duplicate related objects use their object kind as the category and are deduplicated only within the same infant observation. The same visible object may legitimately relate to two different infants and must remain attached to both. The complete result is revalidated after deduplication so removing a contradictory duplicate cannot silently break mouth/nose grounding invariants. Every removal emits a server warning and a per-attempt history warning while preserving the byte-for-byte raw response. There is no IoU, approximate overlap, cross-category, tracking, or visual deduplication.
+After canonical coordinate conversion, exact coordinate duplicates within the same semantic category are the only allowed raw-result post-processing exception. The first observation/box is retained and later identical boxes are removed. Infant, adult, and cat duplicates remove the later full observation; duplicate related objects use their object kind as the category and are deduplicated only within the same infant observation. The same visible object may legitimately relate to two different infants and must remain attached to both. The complete result is revalidated after deduplication so removing a contradictory duplicate cannot silently break mouth/nose grounding invariants. Every removal emits a server warning and a per-attempt history warning while preserving the byte-for-byte raw response. There is no IoU, approximate overlap, cross-category, tracking, or visual deduplication in `FrameAnalysis`.
+
+After validation, the separate [temporal stabilization layer](STABILIZATION.md) may associate same-category boxes by IoU and expose EMA-smoothed boxes under `stabilized`. That derived snapshot never replaces or mutates `FrameAnalysis`, and the UI always provides a raw-box view.
 
 ## Shared prompt baseline
 
-Current prompt version: `baby-monitor-single-frame-v9-infrared-bedding-geometry`.
+Current prompt version: `baby-monitor-single-frame-v10-mouth-nose-spatial-preflight`.
 
 The shared English prompt:
 
@@ -81,6 +83,7 @@ The shared English prompt:
 - excludes dolls, plush toys, prints, bedding folds, patterns, shadows, and ambiguous shapes;
 - defines posture, mouth/nose object coverage, blanket coverage, related objects, adult-presence consistency, cat proximity, and risk semantics;
 - recognizes monochrome infrared/night-vision frames and distinguishes fitted clothing from loose bedding using visible body-contour, exposed-leg, drape, fold, and mattress-overflow geometry rather than grayscale tone; ambiguous blanket classification remains `unknown`, while a class-uncertain textile with clear mouth/nose overlap remains grounded as `other_occluder`;
+- requires a final mouth/nose spatial preflight: the returned mouth/nose and covering-object rectangles must pass both positive-area intersection inequalities before the model may emit partial/full coverage or a covering relation; a body-only or below-face blanket cannot justify mouth/nose coverage;
 - embeds the exact generated JSON Schema;
 - requires JSON only.
 
@@ -105,7 +108,7 @@ Do not tune one provider by silently appending semantic hints in its adapter. If
 - `normal`: no visible concern under the prompt definitions.
 - `unknown`: no infant or unusable/insufficient visual evidence.
 
-These are visual attention hints, not diagnoses or guarantees. The UI must not imply an automated safety alarm.
+These are visual attention hints, not diagnoses or guarantees. The UI may present their separately stabilized experimental alarm state, but must not imply a medically validated, fail-safe, or unattended life-safety alarm.
 
 ## Provider interface
 
@@ -128,7 +131,7 @@ Gemini adapter:
 - lists compatible Gemini models plus hosted Gemma 4 image-input models supported by the Interactions API, while excluding older/text-only Gemma and embedding/image-generation/video/live/audio variants;
 - counts thinking tokens as output tokens.
 
-The monitor retries once for transient/unclassified provider failures and local validation failures. It does not replay a deterministic provider HTTP 4xx with an unchanged request. Every call stores an explicit attempt number, the exact prompt sent for that call, outcome, sanitized error type/message, response index, provider usage, retry decision, and retry reason. This mapping remains correct when a provider fails before producing either a response or usage data; UI code must not infer correspondence from parallel array indexes. A local JSON-envelope, non-object, or Pydantic validation failure receives a concise correction suffix on the second request; provider exceptions such as a missing SDK response field do not. Correction codes never copy raw model output into the next prompt. The top-level history prompt remains the immutable session baseline, while each attempt record is the authoritative byte-for-byte prompt audit for that model call; all copies count toward the history memory budget.
+The monitor retries once for transient/unclassified provider failures and local validation failures. It does not replay a deterministic provider HTTP 4xx with an unchanged request. Every call stores an explicit attempt number, the exact prompt sent for that call, outcome, sanitized error type/message, response index, provider usage, retry decision, and retry reason. This mapping remains correct when a provider fails before producing either a response or usage data; UI code must not infer correspondence from parallel array indexes. A local JSON-envelope, non-object, or Pydantic validation failure receives a concise correction suffix on the second request; mouth/nose grounding failures receive a stable targeted code plus the rectangle-intersection preflight, without copying model output into the next call. Provider exceptions such as a missing SDK response field do not. Correction codes never copy raw model output into the next prompt. The top-level history prompt remains the immutable session baseline, while each attempt record is the authoritative byte-for-byte prompt audit for that model call; all copies count toward the history memory budget.
 
 Model JSON parsing preserves every raw response unchanged in history. The validator accepts exactly one JSON value, optionally wrapped by a complete single empty/`json` Markdown code fence or followed only by an isolated closing fence. An opening fence without its closing fence is invalid. This narrow compatibility handles hosted models that append ` ``` ` despite structured-output mode. A second JSON value, prose, another fence block, or any other trailing content remains a visible parse failure; the parser never searches greedily for a convenient object.
 

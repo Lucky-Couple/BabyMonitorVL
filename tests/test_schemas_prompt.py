@@ -113,7 +113,7 @@ def test_model_analysis_rejects_non_object_json() -> None:
 def test_prompt_embeds_exact_schema() -> None:
     schema = output_schema()
     prompt = build_prompt(schema)
-    assert PROMPT_VERSION == "baby-monitor-single-frame-v9-infrared-bedding-geometry"
+    assert PROMPT_VERSION == "baby-monitor-single-frame-v10-mouth-nose-spatial-preflight"
     assert json.dumps(schema, ensure_ascii=False, separators=(",", ":")) in prompt
     assert "[ymin, xmin, ymax, xmax]" in prompt
     assert "Do not infer motion, breathing, airflow" in prompt
@@ -150,6 +150,15 @@ def test_prompt_embeds_exact_schema() -> None:
     assert "Never infer airflow, breathing, suffocation" in prompt
     assert "MOUTH/NOSE CONSISTENCY RULES" in prompt
     assert "fully_covered requires a visible related_objects entry" in prompt
+    assert "numerically verify positive-area intersection" in prompt
+    assert "max(mouth_ymin, object_ymin) < min(mouth_ymax, object_ymax)" in prompt
+    assert "If either intersection condition is false" in prompt
+    assert "A blanket below the face or covering only the body cannot justify" in prompt
+    assert "Final preflight for every infant" in prompt
+    assert "positive-area box intersection" in infant_schema["properties"]["mouth_nose_occlusion"][
+        "description"
+    ]
+    assert "positive-area intersection" in related_object_schema["properties"]["box"]["description"]
     assert "INFRARED / NIGHT-VISION GUIDANCE" in prompt
     assert "do not distinguish clothing from bedding by grayscale tone alone" in prompt
     assert "visible bare thigh or leg segment as an anatomical anchor" in prompt

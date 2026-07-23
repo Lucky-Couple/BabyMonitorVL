@@ -2,6 +2,8 @@ import { FormEvent, useCallback, useEffect, useMemo, useRef, useState } from "re
 import hljs from "highlight.js/lib/core";
 import jsonLanguage from "highlight.js/lib/languages/json";
 import type {
+    AlarmState,
+    AlarmTimelinePoint,
   BlanketCoverage,
   Box,
   CatProximity,
@@ -17,6 +19,8 @@ import type {
   ProviderName,
   RelatedObjectKind,
   Risk,
+  StabilizedSnapshot,
+  StableObjectCategory,
 } from "./types";
 
 hljs.registerLanguage("json", jsonLanguage);
@@ -28,8 +32,8 @@ interface LiveFrameState {
   capturedAt: string | null;
   width: number | null;
   height: number | null;
-  actualIntervalSeconds: number | null;
-  analysisBitrateKbps: number | null;
+  previewFps: number | null;
+  previewBitrateKbps: number | null;
 }
 
 function readRtspDraft(): string {
@@ -50,6 +54,59 @@ function writeRtspDraft(value: string) {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+const apiFieldLabels: Record<string, string> = {
+  rtsp_url: "RTSP 地址",
+  min_frame_interval_seconds: "最小帧间隔",
+  provider: "模型后端",
+  model: "模型",
+  rtsp_transport: "RTSP Transport",
+};
+
+function apiDetailText(value: unknown): string | null {
+  if (typeof value === "string") return value;
+  if (typeof value === "number" || typeof value === "boolean") return String(value);
+  if (Array.isArray(value)) {
+    const messages = value.map(apiDetailText).filter((item): item is string => Boolean(item));
+    return messages.length > 0 ? messages.join("；") : null;
+  }
+  if (!isRecord(value)) return null;
+  if (typeof value.msg === "string") {
+    const location = Array.isArray(value.loc)
+      ? value.loc.filter((item) => item !== "body").map(String)
+      : [];
+    const field = location.length > 0 ? location[location.length - 1] : "";
+    const label = apiFieldLabels[field] ?? field;
+    let message = value.msg.replace(/^Value error,\s*/i, "");
+    if (field === "rtsp_url" && /URL must use rtsp/i.test(message)) {
+      message = "必须以 rtsp:// 或 rtsps:// 开头";
+    } else if (/^Field required$/i.test(message)) {
+      message = "此项不能为空";
+    }
+    return label ? `${label}：${message}` : message;
+  }
+  if ("detail" in value) return apiDetailText(value.detail);
+  if ("message" in value) return apiDetailText(value.message);
+  try {
+    return JSON.stringify(value);
+  } catch {
+    return null;
+  }
+}
+
+async function responseErrorMessage(response: Response, fallback: string): Promise<string> {
+  const raw = await response.text();
+  if (raw) {
+    try {
+      const parsed = JSON.parse(raw);
+      const detail = apiDetailText(parsed);
+      if (detail) return detail;
+    } catch {
+      return raw;
+    }
+  }
+  return `${fallback}（HTTP ${response.status}）`;
 }
 
 function isNullableString(value: unknown): value is string | null {
@@ -93,7 +150,59 @@ function isMonitorStatus(value: unknown): value is MonitorStatus {
     && isNullableNumber(value.last_latency_ms)
     && isNullableNumber(value.reconnect_delay_seconds)
     && counters.every((name) => isNonNegativeNumber(value[name]))
-    && ["items", "bytes", "max_bytes"].every((name) => isNonNegativeNumber(history[name]));
+    && ["items", "bytes", "max_bytes"].every((name) => isNonNegativeNumber(history[name]))
+    && (value.alarm === null || isRecord(value.alarm));
+}
+
+function isRisk(value: unknown): value is Risk {
+  return value === "normal" || value === "watch" || value === "alert" || value === "unknown";
+}
+
+function isStabilizedSnapshot(value: unknown): value is StabilizedSnapshot {
+  return isRecord(value)
+    && typeof value.session_id === "string"
+    && isNullableString(value.record_id)
+    && isNullableString(value.observed_at)
+    && isNonNegativeNumber(value.sequence)
+    && (value.phase === "warming_up" || value.phase === "stable")
+    && isNonNegativeNumber(value.sample_count)
+    && isNonNegativeNumber(value.window_size)
+    && isNonNegativeNumber(value.confirmation_frames)
+    && isNonNegativeNumber(value.clear_frames)
+    && isRisk(value.raw_risk)
+    && isRisk(value.stable_risk)
+    && typeof value.alarm_active === "boolean"
+    && isNullableString(value.changed_at)
+    && Array.isArray(value.reasons)
+    && Array.isArray(value.signals)
+    && Array.isArray(value.objects);
+}
+
+function timelinePointFromSnapshot(snapshot: StabilizedSnapshot): AlarmTimelinePoint | null {
+  if (!snapshot.record_id || !snapshot.observed_at || snapshot.sequence < 1) return null;
+  return {
+    sequence: snapshot.sequence,
+    record_id: snapshot.record_id,
+    observed_at: snapshot.observed_at,
+    raw_risk: snapshot.raw_risk,
+    stable_risk: snapshot.stable_risk,
+    phase: snapshot.phase,
+    alarm_active: snapshot.alarm_active,
+    reason_codes: snapshot.reasons.map((reason) => reason.code),
+  };
+}
+
+function mergeAlarmSnapshot(current: AlarmState, snapshot: StabilizedSnapshot): AlarmState {
+  const point = timelinePointFromSnapshot(snapshot);
+  if (current.current?.session_id !== snapshot.session_id) {
+    return { current: snapshot, timeline: point ? [point] : [] };
+  }
+  if (!point || current.timeline.some(
+    (item) => item.sequence === point.sequence && item.record_id === point.record_id,
+  )) {
+    return { ...current, current: snapshot };
+  }
+  return { current: snapshot, timeline: [...current.timeline, point].slice(-500) };
 }
 
 type DisplayLabelKey =
@@ -155,6 +264,32 @@ const overlayColors: Record<string, string> = {
   adult: "#ff6bd6",
 };
 
+const stableCategoryLabels: Record<StableObjectCategory, string> = {
+  infant: "婴儿",
+  mouth_nose: "口鼻",
+  adult: "成人",
+  cat: "猫",
+  blanket: "被子",
+  pillow: "枕头",
+  toy: "玩具",
+  hand: "手部",
+  other_occluder: "其他遮挡物",
+};
+
+const alarmReasonLabels: Record<string, string> = {
+  mouth_nose_fully_covered: "口鼻持续被完全覆盖",
+  mouth_nose_partially_covered: "口鼻持续被部分覆盖",
+  mouth_nose_not_visible: "口鼻持续不可见",
+  prone_posture: "持续检测到俯卧",
+  blanket_covering_mouth_nose: "被子持续覆盖口鼻",
+  blanket_near_mouth_nose: "被子持续靠近口鼻",
+  model_overall_alert: "模型持续给出立即查看",
+  model_overall_watch: "模型持续给出需关注",
+  model_infant_alert: "婴儿状态持续被判定为立即查看",
+  model_infant_watch: "婴儿状态持续被判定为需关注",
+  cat_near_infant: "猫持续靠近婴儿",
+};
+
 const emptyStatus: MonitorStatus = {
   state: "stopped",
   session_id: null,
@@ -175,6 +310,7 @@ const emptyStatus: MonitorStatus = {
   input_tokens: 0,
   output_tokens: 0,
   history: { items: 0, bytes: 0, max_bytes: 0 },
+  alarm: null,
 };
 
 function formatTime(value: string | null) {
@@ -196,10 +332,14 @@ function formatTokens(value: number | null | undefined) {
   return new Intl.NumberFormat("zh-CN").format(value);
 }
 
-function formatAnalysisBitrate(value: number | null) {
+function formatPreviewBitrate(value: number | null) {
   if (value === null) return "—";
   if (value >= 1000) return `${(value / 1000).toFixed(2)} Mbps`;
   return `${value.toFixed(0)} kbps`;
+}
+
+function formatPreviewFps(value: number | null) {
+  return value === null ? "—" : `${value.toFixed(1)} fps`;
 }
 
 function formatFrameInterval(value: number | null | undefined) {
@@ -310,7 +450,47 @@ function BoxOverlay({ analysis, compact = false }: { analysis: FrameAnalysis | n
   );
 }
 
-function AnnotatedFrame({ detail }: { detail: HistoryDetail | null }) {
+function stableBoxes(snapshot: StabilizedSnapshot | null | undefined): OverlayBox[] {
+  if (!snapshot) return [];
+  const totals = new Map<StableObjectCategory, number>();
+  snapshot.objects.forEach((object) => {
+    totals.set(object.category, (totals.get(object.category) ?? 0) + 1);
+  });
+  const indexes = new Map<StableObjectCategory, number>();
+  return snapshot.objects.map((object) => {
+    const index = indexes.get(object.category) ?? 0;
+    indexes.set(object.category, index + 1);
+    return {
+      box: object.box,
+      label: subjectLabel(
+        `稳定·${stableCategoryLabels[object.category]}`,
+        index,
+        totals.get(object.category) ?? 1,
+      ),
+      color: overlayColors[object.category] ?? "#c0cad4",
+    };
+  });
+}
+
+function StableBoxOverlay({ snapshot }: { snapshot: StabilizedSnapshot | null | undefined }) {
+  const boxes = useMemo(() => stableBoxes(snapshot), [snapshot]);
+  return (
+    <svg viewBox="0 0 1000 1000" preserveAspectRatio="none" aria-label="时序稳定标注框">
+      {boxes.map(({ box, label, color }, index) => {
+        const [ymin, xmin, ymax, xmax] = box;
+        return (
+          <g key={`${label}-${index}`}>
+            <rect x={xmin} y={ymin} width={xmax - xmin} height={ymax - ymin} fill="transparent" stroke={color} strokeWidth={2} vectorEffect="non-scaling-stroke" />
+            <rect x={xmin} y={Math.max(0, ymin - 35)} width={Math.max(125, label.length * 30)} height={35} fill={color} fillOpacity={0.45} />
+            <text x={xmin + 8} y={Math.max(25, ymin - 10)} fill="#071018" fontSize={25} fontWeight="700">{label}</text>
+          </g>
+        );
+      })}
+    </svg>
+  );
+}
+
+function AnnotatedFrame({ detail, overlayMode }: { detail: HistoryDetail | null; overlayMode: "stable" | "raw" }) {
   if (!detail) {
     return <div className="empty-frame">等待第一帧分析结果</div>;
   }
@@ -320,7 +500,9 @@ function AnnotatedFrame({ detail }: { detail: HistoryDetail | null }) {
       style={{ aspectRatio: `${detail.image_width} / ${detail.image_height}` }}
     >
       <img src={`${detail.image_url}?v=${detail.completed_at ?? detail.captured_at}`} alt="已分析监控帧" />
-      <BoxOverlay analysis={detail.analysis} />
+      {overlayMode === "stable"
+        ? <StableBoxOverlay snapshot={detail.stabilized} />
+        : <BoxOverlay analysis={detail.analysis} />}
     </div>
   );
 }
@@ -491,6 +673,119 @@ function AnalysisPanel({ analysis }: { analysis: FrameAnalysis | null | undefine
   );
 }
 
+function AlarmPanel({
+  alarm,
+  active,
+  onSelectRecord,
+}: {
+  alarm: AlarmState;
+  active: boolean;
+  onSelectRecord: (recordId: string) => void;
+}) {
+  const current = alarm.current;
+  if (!current) {
+    return (
+      <section className="alarm-panel alarm-unknown">
+        <div className="alarm-empty">启动监控后，稳定报警信号和时间轴会显示在这里。</div>
+      </section>
+    );
+  }
+  const warming = current.phase === "warming_up";
+  const infantSignal = current.signals.find((signal) => signal.category === "infant");
+  const unknownHeadline = infantSignal?.state === "not_detected"
+    ? "稳定信号：未检测到婴儿"
+    : infantSignal?.state === "present"
+      ? "稳定信号：婴儿风险尚未确认"
+      : "稳定信号：无可靠婴儿信息";
+  const headline = warming
+    ? `正在确认婴儿信息 ${Math.min(current.sample_count, current.confirmation_frames)} / ${current.confirmation_frames}`
+    : current.stable_risk === "alert"
+      ? "报警：请立即人工查看"
+      : current.stable_risk === "watch"
+        ? "稳定信号：需关注"
+        : current.stable_risk === "normal"
+          ? "稳定信号：当前正常"
+          : unknownHeadline;
+  const displayHeadline = active ? headline : `上次会话 · ${headline}`;
+  const signalOrder: StableObjectCategory[] = [
+    "infant",
+    "adult",
+    "cat",
+    "mouth_nose",
+    "blanket",
+    "pillow",
+    "toy",
+    "hand",
+    "other_occluder",
+  ];
+  const signals = [...current.signals].sort(
+    (left, right) => signalOrder.indexOf(left.category) - signalOrder.indexOf(right.category),
+  );
+  const timeline = alarm.timeline.slice(-80);
+  return (
+    <section className={`alarm-panel alarm-${current.stable_risk}${active ? "" : " alarm-stopped"}`}>
+      {!active && (
+        <div className="alarm-stopped-note">监控已停止，以下为上次会话保留结果。</div>
+      )}
+      <div className="alarm-main">
+        <div className="alarm-indicator" aria-label={`${active ? "当前" : "上次会话"}稳定报警状态：${labels[current.stable_risk]}`}>
+          <span className="alarm-pulse" />
+          <div>
+            <span className="eyebrow">STABILIZED ALARM SIGNAL</span>
+            <strong>{displayHeadline}</strong>
+            <small>
+              原始帧：{labels[current.raw_risk]} · 稳定结果：{labels[current.stable_risk]} ·
+              最近 {current.window_size} 帧中至少 {current.confirmation_frames} 帧确认，连续 {current.clear_frames} 帧降级才解除
+            </small>
+          </div>
+        </div>
+        <div className="alarm-reasons">
+          <span>稳定原因</span>
+          {current.reasons.length > 0
+            ? current.reasons.map((reason) => (
+              <strong key={reason.code} title={`${reason.support_count} / ${reason.window_count} 帧支持`}>
+                {alarmReasonLabels[reason.code] ?? reason.code}
+              </strong>
+            ))
+            : <strong>{warming ? "正在收集足够样本" : "没有达到稳定风险阈值"}</strong>}
+        </div>
+      </div>
+      <div className="stable-signals" aria-label="稳定目标与物品信号">
+        {signals.map((signal) => (
+          <div className={`stable-signal signal-${signal.state}`} key={signal.category} title={`${signal.support_count} / ${signal.window_count} 帧检测到`}>
+            <span>{stableCategoryLabels[signal.category]}</span>
+            <strong>
+              {signal.state === "present"
+                ? `存在${signal.count > 1 ? ` ×${signal.count}` : ""}`
+                : signal.state === "not_detected" ? "未检测到" : "待确认"}
+            </strong>
+          </div>
+        ))}
+      </div>
+      <div className="alarm-timeline">
+        <div className="alarm-timeline-heading">
+          <strong>稳定报警时间轴</strong>
+          <span>最近 {timeline.length} 次成功分析 · 细线为单帧，色块为稳定结果</span>
+        </div>
+        <div className="alarm-timeline-bars" aria-label="稳定报警时间轴">
+          {timeline.length > 0 ? timeline.map((point) => (
+            <button
+              type="button"
+              className={`timeline-point risk-${point.stable_risk}`}
+              key={`${point.sequence}-${point.record_id}`}
+              title={`${formatTime(point.observed_at)} · 单帧 ${labels[point.raw_risk]} · 稳定 ${labels[point.stable_risk]}${point.reason_codes.length ? ` · ${point.reason_codes.map((code) => alarmReasonLabels[code] ?? code).join("、")}` : ""}`}
+              aria-label={`查看 ${formatTime(point.observed_at)} 的分析，稳定状态 ${labels[point.stable_risk]}`}
+              onClick={() => onSelectRecord(point.record_id)}
+            >
+              <i className={`raw-${point.raw_risk}`} />
+            </button>
+          )) : <div className="timeline-empty">等待第一条成功分析</div>}
+        </div>
+      </div>
+    </section>
+  );
+}
+
 export default function App() {
   const [providers, setProviders] = useState<Record<ProviderName, ProviderInfo> | null>(null);
   const [status, setStatus] = useState<MonitorStatus>(emptyStatus);
@@ -499,6 +794,8 @@ export default function App() {
   const [loadingOlder, setLoadingOlder] = useState(false);
   const [detail, setDetail] = useState<HistoryDetail | null>(null);
   const [liveFrame, setLiveFrame] = useState<LiveFrameState | null>(null);
+  const [alarm, setAlarm] = useState<AlarmState>({ current: null, timeline: [] });
+  const [overlayMode, setOverlayMode] = useState<"stable" | "raw">("raw");
   const [provider, setProvider] = useState<ProviderName>("ollama");
   const [model, setModel] = useState("qwen3-vl:4b");
   const [rtspUrl, setRtspUrl] = useState(readRtspDraft);
@@ -514,6 +811,12 @@ export default function App() {
   const geminiDialogRef = useRef<HTMLDialogElement>(null);
   const reconnectTimer = useRef<number | null>(null);
   const loadedOlderHistory = useRef(false);
+
+  const fetchAlarm = useCallback(async () => {
+    const response = await fetch("/api/alarm");
+    if (!response.ok) throw new Error("加载稳定报警状态失败");
+    setAlarm(await response.json());
+  }, []);
 
   const fetchHistory = useCallback(async (preferredId?: string) => {
     const response = await fetch("/api/history?limit=200");
@@ -536,7 +839,7 @@ export default function App() {
     setLoadingOlder(true);
     try {
       const response = await fetch(`/api/history?limit=200&cursor=${encodeURIComponent(nextHistoryCursor)}`);
-      if (!response.ok) throw new Error("加载更早历史失败");
+      if (!response.ok) throw new Error(await responseErrorMessage(response, "加载更早历史失败"));
       const body = await response.json();
       loadedOlderHistory.current = true;
       setHistory((existing) => {
@@ -552,12 +855,14 @@ export default function App() {
   }
 
   useEffect(() => {
-    Promise.all([fetch("/api/providers"), fetch("/api/monitor/status")])
-      .then(async ([providerResponse, statusResponse]) => {
+    Promise.all([fetch("/api/providers"), fetch("/api/monitor/status"), fetch("/api/alarm")])
+      .then(async ([providerResponse, statusResponse, alarmResponse]) => {
         const providerBody = await providerResponse.json();
         const statusBody = await statusResponse.json();
+        const alarmBody = await alarmResponse.json();
         setProviders(providerBody);
         setStatus(statusBody);
+        setAlarm(alarmBody);
         if (statusBody.provider && statusBody.model) {
           setProvider(statusBody.provider);
           setModel(statusBody.model);
@@ -572,9 +877,18 @@ export default function App() {
   useEffect(() => {
     let socket: WebSocket | null = null;
     let closed = false;
+    let hasConnected = false;
     const connect = () => {
       const protocol = location.protocol === "https:" ? "wss" : "ws";
       socket = new WebSocket(`${protocol}://${location.host}/api/events`);
+      socket.onopen = () => {
+        if (hasConnected) {
+          void fetchAlarm().catch((reason) => setError(
+            reason instanceof Error ? reason.message : String(reason),
+          ));
+        }
+        hasConnected = true;
+      };
       socket.onmessage = (message) => {
         let event: unknown;
         try {
@@ -584,15 +898,25 @@ export default function App() {
         }
         if (!isRecord(event) || typeof event.type !== "string") return;
         if (event.type === "heartbeat") return;
-        if (event.type === "status" && isMonitorStatus(event.data)) setStatus(event.data);
+        if (event.type === "status" && isMonitorStatus(event.data)) {
+          const nextStatus = event.data;
+          setStatus(nextStatus);
+          if (nextStatus.state === "stopped") setLiveFrame(null);
+          if (nextStatus.alarm) {
+            const nextAlarm = nextStatus.alarm;
+            setAlarm((current) => current.current?.session_id === nextAlarm.session_id
+              ? { ...current, current: nextAlarm }
+              : { current: nextAlarm, timeline: [] });
+          }
+        }
         if (event.type === "capture" && isRecord(event.data) && typeof event.data.image_url === "string") {
           setLiveFrame({
-            imageUrl: `${event.data.image_url}&t=${Date.now()}`,
+            imageUrl: event.data.image_url,
             capturedAt: typeof event.data.captured_at === "string" ? event.data.captured_at : null,
             width: isNonNegativeNumber(event.data.width) ? event.data.width : null,
             height: isNonNegativeNumber(event.data.height) ? event.data.height : null,
-            actualIntervalSeconds: isNullableNumber(event.data.actual_interval_seconds) ? event.data.actual_interval_seconds : null,
-            analysisBitrateKbps: isNullableNumber(event.data.analysis_bitrate_kbps) ? event.data.analysis_bitrate_kbps : null,
+            previewFps: isNullableNumber(event.data.preview_fps) ? event.data.preview_fps : null,
+            previewBitrateKbps: isNullableNumber(event.data.preview_bitrate_kbps) ? event.data.preview_bitrate_kbps : null,
           });
         }
         if (
@@ -601,6 +925,10 @@ export default function App() {
           && typeof event.data.id === "string"
         ) {
           void fetchHistory(event.data.id);
+        }
+        if (event.type === "alarm_updated" && isStabilizedSnapshot(event.data)) {
+          const snapshot = event.data;
+          setAlarm((current) => mergeAlarmSnapshot(current, snapshot));
         }
       };
       socket.onclose = () => {
@@ -613,7 +941,7 @@ export default function App() {
       if (reconnectTimer.current) window.clearTimeout(reconnectTimer.current);
       socket?.close();
     };
-  }, [fetchHistory]);
+  }, [fetchAlarm, fetchHistory]);
 
   const changeProvider = (next: ProviderName) => {
     setProvider(next);
@@ -659,8 +987,8 @@ export default function App() {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ api_key: geminiKey }),
       });
+      if (!response.ok) throw new Error(await responseErrorMessage(response, "Gemini Key 验证失败"));
       const body = await response.json();
-      if (!response.ok) throw new Error(body.detail ?? "Gemini Key 验证失败");
       updateGeminiProvider(body);
       setGeminiKey("");
       geminiDialogRef.current?.close();
@@ -676,8 +1004,8 @@ export default function App() {
     setGeminiKeyError(null);
     try {
       const response = await fetch("/api/providers/gemini/key", { method: "DELETE" });
+      if (!response.ok) throw new Error(await responseErrorMessage(response, "恢复 Gemini Key 配置失败"));
       const body = await response.json();
-      if (!response.ok) throw new Error(body.detail ?? "恢复 Gemini Key 配置失败");
       updateGeminiProvider(body);
       setGeminiKey("");
       geminiDialogRef.current?.close();
@@ -704,7 +1032,7 @@ export default function App() {
           rtsp_transport: transport,
         }),
       });
-      if (!response.ok) throw new Error((await response.json()).detail ?? "启动失败");
+      if (!response.ok) throw new Error(await responseErrorMessage(response, "启动失败"));
       setLiveFrame(null);
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
@@ -718,7 +1046,7 @@ export default function App() {
     setError(null);
     try {
       const response = await fetch("/api/monitor/stop", { method: "POST" });
-      if (!response.ok) throw new Error("停止失败");
+      if (!response.ok) throw new Error(await responseErrorMessage(response, "停止失败"));
     } catch (reason) {
       setError(reason instanceof Error ? reason.message : String(reason));
     } finally {
@@ -875,6 +1203,8 @@ export default function App() {
         </form>
       </dialog>
 
+      <AlarmPanel alarm={alarm} active={active} onSelectRecord={(recordId) => void selectHistory(recordId)} />
+
       <section className="metrics-grid">
         <div><span>已提交</span><strong title={String(status.submitted_count)}>{status.submitted_count}</strong></div>
         <div><span>已完成</span><strong title={String(status.completed_count)}>{status.completed_count}</strong></div>
@@ -885,12 +1215,17 @@ export default function App() {
         <div title={`${formatBytes(status.history.bytes)} / ${formatBytes(status.history.max_bytes)}`}><span>历史内存</span><strong>{formatBytes(status.history.bytes)}</strong><small>/ {formatBytes(status.history.max_bytes)}</small></div>
       </section>
 
-      {status.last_error && <div className="stream-error" title={status.last_error}>{status.last_error}</div>}
+      {status.last_error && (
+        <div className="stream-error" title={status.last_error}>
+          <strong>{status.state === "reconnecting" ? "RTSP 连接异常" : "模型分析异常"}</strong>
+          <span>{status.last_error}</span>
+        </div>
+      )}
 
       <main className="monitor-grid">
         <section className="panel primary-live">
           <div className="panel-heading">
-            <div><span className="section-number">01</span><span className="live-dot" /><h2>最近即时抽帧</h2></div>
+            <div><span className="section-number">01</span><span className="live-dot" /><h2>实时 RTSP 预览</h2></div>
             <div className="frame-meta" title={formatTime(liveFrame?.capturedAt ?? status.last_capture_at)}>{formatTime(liveFrame?.capturedAt ?? status.last_capture_at)}</div>
           </div>
           {liveFrame ? (
@@ -898,30 +1233,36 @@ export default function App() {
               className="live-frame"
               style={liveFrame.width && liveFrame.height ? { aspectRatio: `${liveFrame.width} / ${liveFrame.height}` } : undefined}
             >
-              <img src={liveFrame.imageUrl} alt="最近即时抽帧" />
+              <img src={liveFrame.imageUrl} alt="实时 RTSP 预览" />
             </div>
           ) : <div className="empty-live">尚无实时画面</div>}
-          <div className="live-debug" aria-label="即时捕获调试信息">
+          <div className="live-debug" aria-label="连续预览调试信息">
             <div>
-              <span>RTSP 原始分辨率</span>
+              <span>RTSP 帧分辨率</span>
               <strong title={liveFrame?.width && liveFrame.height ? `${liveFrame.width} × ${liveFrame.height}` : "—"}>
                 {liveFrame?.width && liveFrame.height ? `${liveFrame.width} × ${liveFrame.height}` : "—"}
               </strong>
             </div>
             <div>
-              <span>实际 / 设定最小帧间隔</span>
-              <strong title={`${formatFrameInterval(liveFrame?.actualIntervalSeconds)} / ${formatFrameInterval(status.min_frame_interval_seconds)}`}>
-                {formatFrameInterval(liveFrame?.actualIntervalSeconds)} / {formatFrameInterval(status.min_frame_interval_seconds)}
+              <span>实测预览帧率</span>
+              <strong title={formatPreviewFps(liveFrame?.previewFps ?? null)}>
+                {formatPreviewFps(liveFrame?.previewFps ?? null)}
               </strong>
             </div>
             <div>
-              <span>分析 JPEG 数据率</span>
-              <strong title={`${formatAnalysisBitrate(liveFrame?.analysisBitrateKbps ?? null)}；不是摄像头原始编码码率`}>
-                {formatAnalysisBitrate(liveFrame?.analysisBitrateKbps ?? null)}
+              <span>预览 JPEG 数据率</span>
+              <strong title={`${formatPreviewBitrate(liveFrame?.previewBitrateKbps ?? null)}；不是摄像头原始编码码率`}>
+                {formatPreviewBitrate(liveFrame?.previewBitrateKbps ?? null)}
+              </strong>
+            </div>
+            <div>
+              <span>模型最小帧间隔</span>
+              <strong title={formatFrameInterval(status.min_frame_interval_seconds)}>
+                {formatFrameInterval(status.min_frame_interval_seconds)}
               </strong>
             </div>
           </div>
-          <p className="live-note">每次模型准备提交请求时才即时连接 RTSP 抓取一帧；模型返回前不会继续抽帧，也不会产生覆盖丢帧。</p>
+          <p className="live-note">预览由同一个 FFmpeg 连接按摄像头可提供的帧率连续输出；模型仍按最小帧间隔串行取得下一张新鲜帧，不会并发提交或积压分析请求。</p>
         </section>
 
         <section className="panel analysis-result">
@@ -934,12 +1275,22 @@ export default function App() {
       <section className="panel latest-analysis-section">
         <div className="panel-heading">
           <div><span className="section-number">03</span><h2>最近完成分析</h2></div>
-          <span title={`抽帧 ${formatTime(detail?.captured_at ?? null)} · 完成 ${formatTime(detail?.completed_at ?? null)}`}>
-            抽帧 {formatTime(detail?.captured_at ?? null)} · 完成 {formatTime(detail?.completed_at ?? null)}
-          </span>
+          <div className="analysis-view-actions">
+            <div className="overlay-mode" aria-label="标注框模式">
+              <button className={overlayMode === "stable" ? "active" : ""} type="button" onClick={() => setOverlayMode("stable")}>稳定框</button>
+              <button className={overlayMode === "raw" ? "active" : ""} type="button" onClick={() => setOverlayMode("raw")}>单帧原始框</button>
+            </div>
+            <span title={`抽帧 ${formatTime(detail?.captured_at ?? null)} · 完成 ${formatTime(detail?.completed_at ?? null)}`}>
+              抽帧 {formatTime(detail?.captured_at ?? null)} · 完成 {formatTime(detail?.completed_at ?? null)}
+            </span>
+          </div>
         </div>
-        <AnnotatedFrame detail={detail} />
-        <p>完整尺寸标注视图；图片、模型框和当前选中的历史记录严格对应。</p>
+        <AnnotatedFrame detail={detail} overlayMode={overlayMode} />
+        <p>
+          {overlayMode === "stable"
+            ? "稳定框由最近多帧结构化结果进行同类关联与坐标平滑；可能短暂保留上一位置。"
+            : "单帧原始框与当前历史图片严格对应，未经时序平滑。"}
+        </p>
       </section>
 
       <section className="history-section">
@@ -987,6 +1338,7 @@ export default function App() {
             }) : <pre>No response</pre>}</details>
             <details><summary>会话基线 Prompt（首次调用）</summary><pre>{detail.prompt}</pre></details>
             <details><summary>JSON Schema</summary><JsonCode value={detail.output_schema} /></details>
+            <details><summary>时序稳定器快照</summary><JsonCode value={detail.stabilized} /></details>
             <details><summary>调用参数与汇总用量</summary><JsonCode value={{ generation: detail.generation_params }} /></details>
           </div>
         </section>

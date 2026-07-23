@@ -12,6 +12,69 @@ class FrameReadTimeout(TimeoutError):
     """FFmpeg produced no complete JPEG frame within the watchdog interval."""
 
 
+def describe_rtsp_failure(lines: list[str], timeout_seconds: float) -> str:
+    """Translate common FFmpeg/RTSP failures while retaining bounded diagnostics."""
+
+    useful = [line.strip() for line in lines if line.strip()]
+    diagnostic = useful[-1] if useful else ""
+    combined = " | ".join(useful).lower()
+    if any(marker in combined for marker in ("401 unauthorized", "server returned 401", "failed: 401")):
+        summary = "RTSP 认证失败：请检查摄像头用户名和密码。"
+    elif any(marker in combined for marker in ("403 forbidden", "server returned 403", "failed: 403")):
+        summary = "RTSP 访问被拒绝（403）：账号可能没有该码流的访问权限。"
+    elif any(marker in combined for marker in ("404 not found", "server returned 404", "failed: 404")):
+        summary = "RTSP 码流不存在（404）：请检查地址中的路径或 stream 名称。"
+    elif "connection refused" in combined:
+        summary = "RTSP 连接被拒绝：请确认摄像头地址、端口以及 RTSP 服务是否开启。"
+    elif any(
+        marker in combined
+        for marker in (
+            "connection timed out",
+            "operation timed out",
+            "no route to host",
+            "network is unreachable",
+        )
+    ):
+        summary = "RTSP 连接超时：请确认摄像头在线，并且当前主机能够访问摄像头所在网络。"
+    elif any(
+        marker in combined
+        for marker in (
+            "name or service not known",
+            "nodename nor servname provided",
+            "failed to resolve hostname",
+            "temporary failure in name resolution",
+        )
+    ):
+        summary = "无法解析 RTSP 主机名：请检查地址中的主机名或 IP。"
+    elif "no complete jpeg frame" in combined:
+        summary = (
+            f"RTSP 已连接，但 {timeout_seconds:g} 秒内没有收到完整视频帧："
+            "摄像头可能卡流、网络中断或该地址没有视频轨道。"
+        )
+    elif any(
+        marker in combined
+        for marker in (
+            "invalid data found when processing input",
+            "could not find codec parameters",
+            "unsupported codec",
+        )
+    ):
+        summary = "已连接 RTSP，但无法解析视频流：请检查码流地址和摄像头视频编码设置。"
+    elif "protocol not found" in combined:
+        summary = "当前 FFmpeg 不支持该 RTSP 协议或地址格式。"
+    elif any(marker in combined for marker in ("end of file", "input/output error")):
+        summary = "RTSP 连接已中断，未能取得完整视频帧。"
+    else:
+        summary = "无法连接或读取 RTSP 视频流：请检查地址、凭据、网络和摄像头状态。"
+
+    if diagnostic:
+        compact = " ".join(diagnostic.split())
+        if len(compact) > 240:
+            compact = compact[:237] + "..."
+        return f"{summary} 技术信息：{compact}"
+    return summary
+
+
 def build_ffmpeg_command(
     binary: str,
     rtsp_url: str,
@@ -32,8 +95,6 @@ def build_ffmpeg_command(
         "-i",
         rtsp_url,
         "-an",
-        "-frames:v",
-        "1",
         "-q:v",
         "4",
         "-f",

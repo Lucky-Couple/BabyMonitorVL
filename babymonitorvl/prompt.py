@@ -7,7 +7,7 @@ from .coordinates import BoxCoordinateOrder, schema_for_box_order
 from .schemas import FrameAnalysis
 
 
-PROMPT_VERSION = "baby-monitor-single-frame-v9-infrared-bedding-geometry"
+PROMPT_VERSION = "baby-monitor-single-frame-v10-mouth-nose-spatial-preflight"
 
 
 def output_schema(
@@ -91,6 +91,10 @@ MOUTH/NOSE CONSISTENCY RULES:
 - partially_covered requires a visible related_objects entry whose relation is partially_covers_mouth_nose or covers_mouth_nose.
 - fully_covered requires a visible related_objects entry whose relation is covers_mouth_nose.
 - not_visible and unknown do not prove object coverage. Do not add a covering object unless its pixels are visible and can be boxed.
+- Before choosing partially_covered or fully_covered, numerically verify positive-area intersection between mouth_nose_box and the SAME related object box. After unpacking coordinates according to the required order, BOTH conditions must be true: max(mouth_ymin, object_ymin) < min(mouth_ymax, object_ymax) AND max(mouth_xmin, object_xmin) < min(mouth_xmax, object_xmax).
+- If either intersection condition is false, that object does not cover the mouth/nose. Do not use partially_covered, fully_covered, partially_covers_mouth_nose, or covers_mouth_nose for it. Use near_mouth_nose only when it is visibly near, and independently choose clear, not_visible, or unknown from the mouth/nose evidence.
+- A blanket used as the covering object must agree with blanket_coverage: partially_covered maps to partially_covering_mouth_nose and fully_covered maps to covering_mouth_nose. A blanket below the face or covering only the body cannot justify mouth/nose coverage.
+- Final preflight for every infant: first lock mouth_nose_box, then lock each tight visible object box, then perform the numeric intersection test, and only then select mouth_nose_occlusion, object relation, blanket_coverage, risk, and evidence. Never claim overlap from prose or appearance when the returned coordinates are disjoint.
 
 {box_instruction} mouth_nose_box must be a small, tight region around the directly visible or cautiously estimated combined mouth-and-nose area; it may be null only when that region cannot be localized reliably enough for a spatial overlap judgment. infant_box, adult_box, and cat_box must tightly enclose visible pixels of that subject. Never repeat an identical bounding box for the same category. Every related_objects entry MUST have a box around visible pixels of that object; if an object cannot be separately located and boxed, omit it from related_objects. Use near_mouth_nose, partially_covers_mouth_nose, or covers_mouth_nose only from visible object geometry. Never invent an object merely to explain an occlusion.
 

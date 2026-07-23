@@ -7,7 +7,7 @@ from typing import Any
 from fastapi import FastAPI, HTTPException, Query, Request, WebSocket, WebSocketDisconnect
 from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response
+from fastapi.responses import FileResponse, HTMLResponse, JSONResponse, Response, StreamingResponse
 from fastapi.staticfiles import StaticFiles
 
 from . import __version__
@@ -18,7 +18,7 @@ from .monitor import MonitorService, redact_sensitive_text
 from .prompt import PROMPT_VERSION, build_prompt, output_schema
 from .providers import GeminiBackend, OllamaBackend
 from .providers.base import ProviderHealth
-from .schemas import GeminiKeyRequest, MonitorStartRequest, MonitorStatus, ProviderName
+from .schemas import AlarmState, GeminiKeyRequest, MonitorStartRequest, MonitorStatus, ProviderName
 
 
 WEBSOCKET_HEARTBEAT_SECONDS = 15.0
@@ -199,6 +199,10 @@ def create_app(settings: Settings | None = None) -> FastAPI:
     async def monitor_status() -> dict[str, Any]:
         return await monitor.status()
 
+    @app.get("/api/alarm", response_model=AlarmState)
+    async def alarm_state() -> AlarmState:
+        return monitor.alarm_state()
+
     @app.get("/api/live/image")
     async def live_image() -> Response:
         frame = await monitor.latest_image()
@@ -208,6 +212,20 @@ def create_app(settings: Settings | None = None) -> FastAPI:
             content=frame.image_bytes,
             media_type="image/jpeg",
             headers={"Cache-Control": "no-store, no-cache, must-revalidate"},
+        )
+
+    @app.get("/api/live/stream")
+    async def live_stream(session_id: str | None = None) -> StreamingResponse:
+        stream = monitor.live_stream(session_id)
+        if stream is None:
+            raise HTTPException(status_code=404, detail="no active live stream")
+        return StreamingResponse(
+            stream,
+            media_type="multipart/x-mixed-replace; boundary=frame",
+            headers={
+                "Cache-Control": "no-store, no-cache, must-revalidate",
+                "X-Accel-Buffering": "no",
+            },
         )
 
     @app.get("/api/history")

@@ -1,6 +1,18 @@
 export type ProviderName = "ollama" | "gemini";
 export type MonitorState = "stopped" | "connecting" | "streaming" | "reconnecting";
 export type Risk = "normal" | "watch" | "alert" | "unknown";
+export type StabilityPhase = "warming_up" | "stable";
+export type StableSignalState = "present" | "not_detected" | "unknown";
+export type StableObjectCategory =
+  | "infant"
+  | "mouth_nose"
+  | "adult"
+  | "cat"
+  | "blanket"
+  | "pillow"
+  | "toy"
+  | "hand"
+  | "other_occluder";
 export type Box = [number, number, number, number];
 export type ImageQuality = "good" | "poor" | "unusable" | "unknown";
 export type Posture = "supine" | "prone" | "side_lying" | "not_lying" | "unknown";
@@ -81,6 +93,66 @@ export interface FrameAnalysis {
   risk_reasons: string[];
 }
 
+export interface StableObject {
+  track_id: string;
+  category: StableObjectCategory;
+  box: Box;
+  confidence: number;
+  support_count: number;
+  window_count: number;
+  missed_frames: number;
+}
+
+export interface StableSignal {
+  category: StableObjectCategory;
+  state: StableSignalState;
+  count: number;
+  support_count: number;
+  window_count: number;
+}
+
+export interface StableAlarmReason {
+  code: string;
+  severity: "watch" | "alert";
+  support_count: number;
+  window_count: number;
+}
+
+export interface StabilizedSnapshot {
+  session_id: string;
+  record_id: string | null;
+  observed_at: string | null;
+  sequence: number;
+  phase: StabilityPhase;
+  sample_count: number;
+  window_size: number;
+  confirmation_frames: number;
+  clear_frames: number;
+  raw_risk: Risk;
+  stable_risk: Risk;
+  alarm_active: boolean;
+  changed_at: string | null;
+  reasons: StableAlarmReason[];
+  signals: StableSignal[];
+  objects: StableObject[];
+}
+
+export interface AlarmTimelinePoint {
+  sequence: number;
+  record_id: string;
+  observed_at: string;
+  raw_risk: Risk;
+  stable_risk: Risk;
+  phase: StabilityPhase;
+  alarm_active: boolean;
+  reason_codes: string[];
+}
+
+export interface AlarmState {
+  current: StabilizedSnapshot | null;
+  timeline: AlarmTimelinePoint[];
+}
+
 export interface HistorySummary {
   id: string;
   session_id: string;
@@ -90,6 +162,7 @@ export interface HistorySummary {
   model: string;
   status: "pending" | "success" | "error";
   analysis: FrameAnalysis | null;
+  stabilized: StabilizedSnapshot | null;
   overall_risk: Risk | null;
   latency_ms: number | null;
   attempts: number;
@@ -114,19 +187,32 @@ export interface AnalysisAttempt {
   retry_reason: string | null;
 }
 
-export interface HistoryDetail extends HistorySummary {
+export interface HistoryDetail {
+  id: string;
+  session_id: string;
+  captured_at: string;
+  completed_at: string | null;
+  provider: ProviderName;
+  model: string;
   source: string;
+  status: "pending" | "success" | "error";
   analysis: FrameAnalysis | null;
+  stabilized: StabilizedSnapshot | null;
   raw_responses: string[];
   errors: string[];
   warnings: string[];
   attempt_details: AnalysisAttempt[];
+  latency_ms: number | null;
+  attempts: number;
+  input_tokens: number | null;
+  output_tokens: number | null;
   prompt_version: string;
   prompt: string;
   output_schema: Record<string, unknown>;
   generation_params: Record<string, unknown>;
   image_width: number;
   image_height: number;
+  image_url: string;
 }
 
 export interface MonitorStatus {
@@ -149,6 +235,7 @@ export interface MonitorStatus {
   input_tokens: number;
   output_tokens: number;
   history: HistoryStats;
+  alarm: StabilizedSnapshot | null;
 }
 
 export interface HistoryStats {

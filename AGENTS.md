@@ -8,11 +8,11 @@ BabyMonitorVL is an experimental, human-reviewed, single-camera visual-language-
 
 The MVP intentionally uses a multimodal LLM/VLM for all semantic visual interpretation. This boundary is non-negotiable unless the product owner explicitly changes it:
 
-- FFmpeg may connect to RTSP on demand, decode exactly one current frame, preserve its resolution, and encode JPEG.
-- Do not add OpenCV, YOLO, MediaPipe, image classifiers, conventional object detectors, trackers, optical flow, pose estimation, segmentation models, or CV-based temporal smoothing.
+- FFmpeg may keep one RTSP connection open for the active session, decode frames continuously at the source-provided cadence, preserve their resolution, and encode MJPEG for the unannotated browser preview. These transient preview frames receive no semantic CV processing and are not stored in history.
+- Do not add OpenCV, YOLO, MediaPipe, image classifiers, conventional object detectors, optical flow, pose estimation, segmentation models, or pixel-derived CV temporal smoothing.
 - Do not infer breathing, health, emotion, diagnosis, events outside the current frame, or medical advice.
-- Each inference request contains one still frame. Do not add hidden cross-frame context or tracking.
-- Do not schedule frames independently of inference. After one model result (including retry handling) completes, enforce the configured minimum frame interval in seconds, then request exactly one fresh frame for the next call. There is no pending-frame queue or dropped-frame counter.
+- Each inference request contains one still frame. Do not add hidden cross-frame model context. The only permitted cross-frame layer is `TemporalStabilizer`, which may filter already-validated structured outputs as documented in `docs/STABILIZATION.md`.
+- Continuous preview decoding is independent of inference, but model submissions remain strictly sequential. After one model result (including retry handling) completes, enforce the configured minimum frame interval in seconds, then wait for the first newly decoded frame and submit exactly that JPEG. There is no pending analysis-frame queue or dropped-analysis-frame counter; preview-only frames are ephemeral and are not counted as model drops.
 
 ## Architectural invariants
 
@@ -20,17 +20,17 @@ The MVP intentionally uses a multimodal LLM/VLM for all semantic visual interpre
 - Capture and inference remain separate asynchronous tasks.
 - `latest_capture` is for the unannotated live preview. The annotated result must always use the exact historical JPEG submitted to the model.
 - History is process-memory-only and is pruned only by `HISTORY_MAX_BYTES`. Do not add persistence, a frame-count cap, or a TTL without an explicit product decision and migration note.
-- RTSP reconnect backoff remains bounded exponential backoff: 1, 2, 4, 8, 16, then 30 seconds. Status keeps consecutive `reconnect_attempt` separate from nullable `reconnect_delay_seconds`; never overload the attempt counter with a duration. Preserve the RTSP-native FFmpeg `timeout` and the Python complete-JPEG watchdog so an on-demand one-frame capture cannot block reconnection indefinitely. Do not add generic `rw_timeout`: FFmpeg may advertise it globally while rejecting it in the RTSP demuxer context.
-- The production container pins and checksum-verifies an official FFmpeg source release. Any FFmpeg command change must pass the Dockerfile's real-binary capability and synthetic image-pipe checks; Python argument-list tests are necessary but insufficient.
-- No audio, push, SMS, email, or audible alarm is part of this MVP.
+- RTSP reconnect backoff remains bounded exponential backoff: 1, 2, 4, 8, 16, then 30 seconds. Status keeps consecutive `reconnect_attempt` separate from nullable `reconnect_delay_seconds`; never overload the attempt counter with a duration. Preserve the RTSP-native FFmpeg `timeout` and the Python complete-JPEG watchdog so a stalled continuous preview cannot block reconnection indefinitely. Do not add generic `rw_timeout`: FFmpeg may advertise it globally while rejecting it in the RTSP demuxer context.
+- The production container pins and checksum-verifies an official FFmpeg source release. Any FFmpeg command change must pass the Dockerfile's real-binary capability and continuous synthetic image-pipe checks; Python argument-list tests are necessary but insufficient.
+- The browser may display the experimental stabilized alarm signal. No audio, push, SMS, email, or external alarm delivery is part of this MVP.
 - API and UI coordinates are always canonical `[ymin, xmin, ymax, xmax]`, integer normalized to `0..1000`.
 - Ollama model basenames matching `qwen*` use model-native `[xmin, ymin, xmax, ymax]`; convert every box to canonical order before Pydantic validation and API/history exposure. Conversion is driven recursively by Pydantic `BoundingBox` annotations, not a field-name allowlist. Gemini and unknown model families use canonical order unless a tested model adapter says otherwise.
 - `mouth_nose_box` is the sole permitted limited hidden-region estimate: the VLM may infer its spatial location only from connected visible head geometry, orientation, outline, and nearby facial landmarks. Partial/full occlusion still requires visible object pixels overlapping that region. Never extend this exception to airflow, breathing, suffocation, health, hidden-body reconstruction, or temporal inference.
-- Never silently clamp, reorder, smooth, or fabricate model boxes. The sole deduplication exception is exact coordinate equality within the same semantic category: keep the first box, drop later boxes, preserve the raw response, emit a server warning, and store that warning in per-call history. Related objects are deduplicated only within one infant observation; the same object box may remain associated with different infants. Never add IoU/fuzzy suppression without an explicit product decision.
+- Never silently clamp, reorder, smooth, or fabricate raw model boxes. The sole raw-result deduplication exception is exact coordinate equality within the same semantic category: keep the first box, drop later boxes, preserve the raw response, emit a server warning, and store that warning in per-call history. Related objects are deduplicated only within one infant observation; the same object box may remain associated with different infants. The separately labeled stabilization layer may use same-category IoU association and EMA coordinates, but must never replace or mutate raw results, inspect image pixels, or perform cross-category association.
 - Preserve provider raw responses byte-for-character in history. Parsing may tolerate only one JSON value with an optional `json`/empty Markdown fence wrapper; never discard prose, accept a second JSON value, or use greedy substring extraction to hide malformed output.
 - Preserve explicit per-call audit mapping between attempt number, the exact prompt sent for that call, outcome, sanitized error, response index, usage, and retry reason. Provider failures can occur before a response or usage exists, so never correlate parallel arrays by list position. The top-level history prompt is only the immutable session baseline; retry corrections belong to the corresponding attempt record.
 
-See [Architecture](docs/ARCHITECTURE.md), [Analysis contract](docs/ANALYSIS_CONTRACT.md), [provider compatibility method](docs/PROVIDER_COMPATIBILITY.md), and [Gemini/Gemma provider rules](docs/GEMINI_PROVIDER.md) before touching scheduling, schemas, prompts, providers, or coordinates.
+See [Architecture](docs/ARCHITECTURE.md), [Analysis contract](docs/ANALYSIS_CONTRACT.md), [Temporal stabilization](docs/STABILIZATION.md), [provider compatibility method](docs/PROVIDER_COMPATIBILITY.md), and [Gemini/Gemma provider rules](docs/GEMINI_PROVIDER.md) before touching scheduling, schemas, prompts, providers, coordinates, or the alarm signal.
 
 ## Repository map
 
@@ -44,6 +44,7 @@ See [Architecture](docs/ARCHITECTURE.md), [Analysis contract](docs/ANALYSIS_CONT
 - `babymonitorvl/coordinates.py`: per-provider/model coordinate convention and canonical conversion.
 - `babymonitorvl/providers/`: provider adapters only; no provider-specific semantic prompt content.
 - `babymonitorvl/history.py`: byte-accounted in-memory records.
+- `babymonitorvl/stabilizer.py`: deterministic hysteresis, structured-signal voting, and stable-box association over validated model results.
 - `frontend/src/App.tsx`: monitor controls, live/result panels, history, overlays, debug response formatting.
 - `frontend/src/types.ts`: frontend mirror of public response types.
 - `tests/`: default offline test suite; real-provider calls must remain opt-in.
@@ -79,7 +80,7 @@ While editing:
 - Public monitor status must remain a validated `MonitorStatus` model; do not replace it with an untyped dictionary. Keep the Python/TypeScript enum and interface sync tests current when either public contract changes.
 - Keep UI enum labels stable and preserve English `summary`/`evidence` for provider comparison.
 - The overlay category palette is stable: infant blue, mouth/nose green, blanket amber, pillow indigo, toy orange, hand cyan, other occluder red, cat purple, adult pink. Change it only on explicit UI direction.
-- Current overlay boxes are thin (`2` main, `1.5` history) and label backgrounds use `fillOpacity=0.45`. Do not add label displacement, fuzzy deduplication, leader lines, or CV-derived corrections without explicit approval.
+- Current overlay boxes are thin (`2` main, `1.5` history) and label backgrounds use `fillOpacity=0.45`. Do not add label displacement, raw-result fuzzy deduplication, leader lines, or CV-derived corrections without explicit approval. Stabilized overlays must remain visibly labeled as stable.
 
 Before handoff:
 
@@ -146,9 +147,9 @@ Prefer the Docker-isolated variants from `docs/DEVELOPMENT.md` when avoiding hos
 - Application version currently appears in `pyproject.toml`, `babymonitorvl/__init__.py`, and `frontend/package.json`; keep all three identical. FastAPI reads `babymonitorvl.__version__`.
 - Prompt and analysis schema versions are independent from the application SemVer.
 - Follow SemVer for application releases and Keep-a-Changelog structure in `CHANGELOG.md`.
-- Do not create a Git tag, commit, push, registry image, or public release unless explicitly authorized.
+- Every application version bump (uprev) must be accompanied by a `vX.Y.Z` Git tag on the same commit, so every released version number maps 1:1 to a tag. Bumping the version, committing that change, and creating the tag are one uprev operation and need no extra authorization; prefer a signed tag (`git tag -s`), falling back to an annotated tag only if signing is unavailable. Pushing the commit or tag to a remote, publishing a container image, and any other public release still require explicit authorization.
 - Follow [Release checklist](docs/RELEASE.md). The project is MIT licensed; do not change the license or copyright holder without explicit owner approval.
 
 ## Current intentional limitations
 
-Single camera, single process, single inference concurrency, no authentication, no persistence, no audio, no notifications, no temporal reasoning, no medical judgment, and no automatic fail-safe behavior. Do not describe these as production-ready capabilities.
+Single camera, single process, single inference concurrency, no authentication, no persistence, no audio, no external notifications, no cross-frame model reasoning, no medical judgment, and no automatic fail-safe behavior. Deterministic structured-output stabilization is experimental and must not be described as a production safety guarantee.

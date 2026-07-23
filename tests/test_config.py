@@ -55,6 +55,49 @@ def test_subject_limits_default_and_environment_override(monkeypatch, tmp_path) 
     assert configured.max_adults == 7
 
 
+def test_stability_defaults_and_environment_override(monkeypatch, tmp_path) -> None:
+    defaults = Settings(frontend_dist=tmp_path)
+    assert defaults.stability_window_size == 5
+    assert defaults.stability_confirmation_frames == 3
+    assert defaults.stability_clear_frames == 3
+    assert defaults.stability_box_iou_threshold == 0.2
+    assert defaults.stability_box_ema_alpha == 0.35
+    assert defaults.stability_timeline_max_points == 500
+
+    monkeypatch.setenv("STABILITY_WINDOW_SIZE", "9")
+    monkeypatch.setenv("STABILITY_CONFIRMATION_FRAMES", "4")
+    monkeypatch.setenv("STABILITY_CLEAR_FRAMES", "5")
+    monkeypatch.setenv("STABILITY_BOX_IOU_THRESHOLD", "0.25")
+    monkeypatch.setenv("STABILITY_BOX_EMA_ALPHA", "0.5")
+    monkeypatch.setenv("STABILITY_TIMELINE_MAX_POINTS", "250")
+    configured = Settings(frontend_dist=tmp_path)
+    assert configured.stability_window_size == 9
+    assert configured.stability_confirmation_frames == 4
+    assert configured.stability_clear_frames == 5
+    assert configured.stability_box_iou_threshold == 0.25
+    assert configured.stability_box_ema_alpha == 0.5
+    assert configured.stability_timeline_max_points == 250
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "message"),
+    [
+        ("STABILITY_WINDOW_SIZE", "2", "STABILITY_WINDOW_SIZE"),
+        ("STABILITY_CONFIRMATION_FRAMES", "1", "STABILITY_CONFIRMATION_FRAMES"),
+        ("STABILITY_CLEAR_FRAMES", "0", "STABILITY_CLEAR_FRAMES"),
+        ("STABILITY_BOX_IOU_THRESHOLD", "0", "STABILITY_BOX_IOU_THRESHOLD"),
+        ("STABILITY_BOX_EMA_ALPHA", "1.1", "STABILITY_BOX_EMA_ALPHA"),
+        ("STABILITY_TIMELINE_MAX_POINTS", "0", "STABILITY_TIMELINE_MAX_POINTS"),
+    ],
+)
+def test_stability_settings_reject_invalid_values(
+    monkeypatch, tmp_path, name: str, value: str, message: str
+) -> None:
+    monkeypatch.setenv(name, value)
+    with pytest.raises(ValueError, match=message):
+        Settings(frontend_dist=tmp_path)
+
+
 @pytest.mark.parametrize(("name", "value"), [("MAX_INFANTS", "0"), ("MAX_ADULTS", "65")])
 def test_subject_limits_reject_unsafe_values(monkeypatch, tmp_path, name: str, value: str) -> None:
     monkeypatch.delenv("MAX_INFANTS", raising=False)

@@ -49,6 +49,24 @@ class Settings:
     )
     max_infants: int = field(default_factory=lambda: _env_int("MAX_INFANTS", 1))
     max_adults: int = field(default_factory=lambda: _env_int("MAX_ADULTS", 4))
+    stability_window_size: int = field(
+        default_factory=lambda: _env_int("STABILITY_WINDOW_SIZE", 5)
+    )
+    stability_confirmation_frames: int = field(
+        default_factory=lambda: _env_int("STABILITY_CONFIRMATION_FRAMES", 3)
+    )
+    stability_clear_frames: int = field(
+        default_factory=lambda: _env_int("STABILITY_CLEAR_FRAMES", 3)
+    )
+    stability_box_iou_threshold: float = field(
+        default_factory=lambda: _env_float("STABILITY_BOX_IOU_THRESHOLD", 0.2)
+    )
+    stability_box_ema_alpha: float = field(
+        default_factory=lambda: _env_float("STABILITY_BOX_EMA_ALPHA", 0.35)
+    )
+    stability_timeline_max_points: int = field(
+        default_factory=lambda: _env_int("STABILITY_TIMELINE_MAX_POINTS", 500)
+    )
     ffmpeg_binary: str = field(default_factory=lambda: os.getenv("FFMPEG_BINARY", "ffmpeg"))
     frontend_dist: Path = field(
         default_factory=lambda: _env_path("FRONTEND_DIST", _DEFAULT_FRONTEND_DIST)
@@ -64,3 +82,31 @@ class Settings:
         for name, value in (("MAX_INFANTS", self.max_infants), ("MAX_ADULTS", self.max_adults)):
             if value < 1 or value > 64:
                 raise ValueError(f"{name} must be between 1 and 64")
+        if self.stability_window_size < 3 or self.stability_window_size > 120:
+            raise ValueError("STABILITY_WINDOW_SIZE must be between 3 and 120")
+        if (
+            self.stability_confirmation_frames < 2
+            or self.stability_confirmation_frames > self.stability_window_size
+        ):
+            raise ValueError(
+                "STABILITY_CONFIRMATION_FRAMES must be between 2 and STABILITY_WINDOW_SIZE"
+            )
+        if (
+            self.stability_clear_frames < 1
+            or self.stability_clear_frames > self.stability_window_size
+        ):
+            raise ValueError(
+                "STABILITY_CLEAR_FRAMES must be between 1 and STABILITY_WINDOW_SIZE"
+            )
+        if (
+            not math.isfinite(self.stability_box_iou_threshold)
+            or not 0 < self.stability_box_iou_threshold <= 1
+        ):
+            raise ValueError("STABILITY_BOX_IOU_THRESHOLD must be in (0, 1]")
+        if (
+            not math.isfinite(self.stability_box_ema_alpha)
+            or not 0 < self.stability_box_ema_alpha <= 1
+        ):
+            raise ValueError("STABILITY_BOX_EMA_ALPHA must be in (0, 1]")
+        if self.stability_timeline_max_points < 1:
+            raise ValueError("STABILITY_TIMELINE_MAX_POINTS must be greater than 0")

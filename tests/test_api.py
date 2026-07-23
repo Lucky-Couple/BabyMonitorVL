@@ -16,7 +16,7 @@ async def test_prompt_and_stopped_status_are_available_without_models(tmp_path) 
         prompt = await client.get("/api/prompt")
         status = await client.get("/api/monitor/status")
     assert prompt.status_code == 200
-    assert prompt.json()["version"] == "baby-monitor-single-frame-v9-infrared-bedding-geometry"
+    assert prompt.json()["version"] == "baby-monitor-single-frame-v10-mouth-nose-spatial-preflight"
     assert "JSON_SCHEMA" in prompt.json()["prompt"]
     assert prompt.json()["output_schema"]["properties"]["infants"]["maxItems"] == 1
     assert prompt.json()["output_schema"]["properties"]["adults"]["maxItems"] == 4
@@ -25,7 +25,30 @@ async def test_prompt_and_stopped_status_are_available_without_models(tmp_path) 
     assert status.json()["reconnect_attempt"] == 0
     assert status.json()["reconnect_delay_seconds"] is None
     assert status.json()["history"]["items"] == 0
+    assert status.json()["alarm"] is None
     assert set(status.json()) == set(MonitorStatus.model_fields)
+
+
+@pytest.mark.asyncio
+async def test_alarm_endpoint_is_available_before_monitoring(tmp_path) -> None:
+    app = create_app(Settings(frontend_dist=tmp_path, gemini_api_key=None))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/alarm")
+
+    assert response.status_code == 200
+    assert response.json() == {"current": None, "timeline": []}
+
+
+@pytest.mark.asyncio
+async def test_live_stream_requires_an_active_monitor_session(tmp_path) -> None:
+    app = create_app(Settings(frontend_dist=tmp_path, gemini_api_key=None))
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as client:
+        response = await client.get("/api/live/stream")
+
+    assert response.status_code == 404
+    assert response.json()["detail"] == "no active live stream"
 
 
 @pytest.mark.asyncio

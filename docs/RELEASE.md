@@ -32,6 +32,14 @@ Also record current:
 
 Move applicable `CHANGELOG.md` Unreleased entries into a dated release section.
 
+Create the `vX.Y.Z` Git tag as part of the version bump itself; it needs no separate authorization and keeps every released version number mapped 1:1 to a tag. Prefer a signed tag, falling back to an annotated tag only if signing is unavailable:
+
+```bash
+git tag -s vX.Y.Z -m "BabyMonitorVL vX.Y.Z"
+```
+
+The tag is created locally. Pushing it (and the version commit) to a remote still requires the explicit authorization in `## Git release steps`.
+
 ## Required quality gates
 
 Run from the repository root:
@@ -46,7 +54,7 @@ docker compose config
 docker build --pull -t babymonitorvl:release-candidate .
 ```
 
-The Docker build is also the FFmpeg CLI compatibility gate: it verifies the pinned official release, exercises an actual RTSP open path with the configured RTSP-native timeout/transport options, and executes the capture pipeline's one-frame MJPEG encoder and image-pipe muxer without timed sampling or resizing. Help-text presence alone is not a compatibility check. Do not waive this gate after changing either `Dockerfile` or `build_ffmpeg_command()`.
+The Docker build is also the FFmpeg CLI compatibility gate: it verifies the pinned official release, exercises an actual RTSP open path with the configured RTSP-native timeout/transport options, and executes a finite synthetic run of the continuous MJPEG encoder and image-pipe muxer without timed sampling or resizing. Help-text presence alone is not a compatibility check. Do not waive this gate after changing either `Dockerfile` or `build_ffmpeg_command()`.
 
 Run an isolated container test if the native environment is not trusted:
 
@@ -92,9 +100,10 @@ Docker/UI smoke:
 3. Start a safe synthetic/local RTSP source with a mock or explicitly authorized model.
 4. Stall the RTSP source without clean EOF and verify the complete-frame watchdog terminates FFmpeg, publishes reconnect status, and recovers through bounded backoff.
 5. Confirm exact-frame overlay, separate live preview, history image/detail, JSON highlighting, token totals, and stop/restart.
-6. Confirm slow inference does not trigger another capture or submission; only after the full result/retry cycle finishes may the next demand-driven frame be acquired. Confirm the configured minimum frame interval is respected between logical request start times.
+6. Confirm the continuous preview keeps advancing during slow inference while no second analysis is submitted. Only after the full result/retry cycle finishes and the configured minimum interval is satisfied may the first subsequently decoded frame be acquired for the next logical request.
+7. Confirm the browser alarm needs the configured vote count to enter, survives fewer than the configured clear count of contradictory results, and visibly distinguishes raw from stable risk/boxes. Confirm a provider failure does not clear the current stable state.
 
-Real-provider contract smoke is opt-in. Record provider/model/version, prompt version, schema version, whether frames left the machine, latency, token fields, and result. Never commit captured frames or raw household data.
+Real-provider contract smoke is opt-in. Record provider/model/version, prompt version, schema version, whether frames left the machine, latency, token fields, and result in [Provider smoke evidence](PROVIDER_SMOKE_EVIDENCE.md). Never commit captured frames, source details, raw responses, or household data. Clearly distinguish contract compatibility evidence from semantic accuracy or grounding validation.
 
 ## Container publication
 
@@ -107,16 +116,15 @@ Real-provider contract smoke is opt-in. Record provider/model/version, prompt ve
 
 ## Git release steps
 
-Only after explicit authorization:
+Pushing to a remote still requires explicit authorization. The `vX.Y.Z` tag was already created during the version bump (see `## Version update`) and needs no extra authorization.
 
 ```bash
 git status --short
-git tag -s vX.Y.Z -m "BabyMonitorVL vX.Y.Z"
 git push origin main
 git push origin vX.Y.Z
 ```
 
-Use an annotated tag if signing is unavailable and the owner accepts that tradeoff. Release notes must include safety limitations, provider/privacy differences, schema/prompt versions, upgrade notes, checks run, image digest, and known issues.
+Release notes must include safety limitations, provider/privacy differences, schema/prompt versions, upgrade notes, checks run, image digest, and known issues.
 
 ## Rollback
 

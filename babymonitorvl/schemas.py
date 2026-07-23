@@ -31,6 +31,29 @@ class RiskLevel(str, Enum):
     UNKNOWN = "unknown"
 
 
+class StabilityPhase(str, Enum):
+    WARMING_UP = "warming_up"
+    STABLE = "stable"
+
+
+class StableObjectCategory(str, Enum):
+    INFANT = "infant"
+    MOUTH_NOSE = "mouth_nose"
+    ADULT = "adult"
+    CAT = "cat"
+    BLANKET = "blanket"
+    PILLOW = "pillow"
+    TOY = "toy"
+    HAND = "hand"
+    OTHER_OCCLUDER = "other_occluder"
+
+
+class StableSignalState(str, Enum):
+    PRESENT = "present"
+    NOT_DETECTED = "not_detected"
+    UNKNOWN = "unknown"
+
+
 class ImageQuality(str, Enum):
     GOOD = "good"
     POOR = "poor"
@@ -99,8 +122,18 @@ class RelatedObject(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
     kind: RelatedObjectKind
-    box: BoundingBox
-    relation: ObjectRelation
+    box: BoundingBox = Field(
+        description=(
+            "Tight box around visible object pixels. A mouth/nose coverage relation requires this "
+            "box to have positive-area intersection with the same infant's mouth_nose_box."
+        )
+    )
+    relation: ObjectRelation = Field(
+        description=(
+            "Visible spatial relation. partially_covers_mouth_nose and covers_mouth_nose require "
+            "positive-area box intersection with the same infant's mouth_nose_box."
+        )
+    )
 
 
 class InfantObservation(BaseModel):
@@ -112,7 +145,11 @@ class InfantObservation(BaseModel):
     )
     posture: Posture
     mouth_nose_occlusion: MouthNoseOcclusion = Field(
-        description="Whether a visible object spatially covers the combined mouth-and-nose region."
+        description=(
+            "Whether a visible object spatially covers the combined mouth-and-nose region. Partial "
+            "or full coverage requires a matching related-object relation and positive-area box "
+            "intersection."
+        )
     )
     blanket_coverage: BlanketCoverage
     related_objects: list[RelatedObject] = Field(max_length=8)
@@ -244,6 +281,7 @@ class MonitorStatus(BaseModel):
     input_tokens: int = Field(default=0, ge=0)
     output_tokens: int = Field(default=0, ge=0)
     history: HistoryStats = Field(default_factory=HistoryStats)
+    alarm: StabilizedSnapshot | None = None
 
 
 class MonitorStartRequest(BaseModel):
@@ -278,6 +316,80 @@ class AnalysisAttempt(BaseModel):
     retry_reason: str | None = None
 
 
+class StableObject(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    track_id: str
+    category: StableObjectCategory
+    box: BoundingBox
+    confidence: float = Field(ge=0, le=1)
+    support_count: int = Field(ge=0)
+    window_count: int = Field(ge=0)
+    missed_frames: int = Field(ge=0)
+
+
+class StableSignal(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    category: StableObjectCategory
+    state: StableSignalState
+    count: int = Field(ge=0)
+    support_count: int = Field(ge=0)
+    window_count: int = Field(ge=0)
+
+
+class StableAlarmReason(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    code: str
+    severity: Literal["watch", "alert"]
+    support_count: int = Field(ge=1)
+    window_count: int = Field(ge=1)
+
+
+class StabilizedSnapshot(BaseModel):
+    """Derived temporal signal; never replaces the raw per-frame FrameAnalysis."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    session_id: str
+    record_id: str | None = None
+    observed_at: str | None = None
+    sequence: int = Field(default=0, ge=0)
+    phase: StabilityPhase = StabilityPhase.WARMING_UP
+    sample_count: int = Field(default=0, ge=0)
+    window_size: int = Field(ge=1)
+    confirmation_frames: int = Field(ge=1)
+    clear_frames: int = Field(ge=1)
+    raw_risk: RiskLevel = RiskLevel.UNKNOWN
+    stable_risk: RiskLevel = RiskLevel.UNKNOWN
+    alarm_active: bool = False
+    changed_at: str | None = None
+    reasons: list[StableAlarmReason] = Field(default_factory=list)
+    signals: list[StableSignal] = Field(default_factory=list)
+    objects: list[StableObject] = Field(default_factory=list)
+
+
+class AlarmTimelinePoint(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    sequence: int = Field(ge=1)
+    record_id: str
+    observed_at: str
+    raw_risk: RiskLevel
+    stable_risk: RiskLevel
+    phase: StabilityPhase
+    alarm_active: bool
+    reason_codes: list[str] = Field(default_factory=list)
+
+
+class AlarmState(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    current: StabilizedSnapshot | None = None
+    timeline: list[AlarmTimelinePoint] = Field(default_factory=list)
+
+
 class HistoryItem(BaseModel):
     id: str
     session_id: str
@@ -288,6 +400,7 @@ class HistoryItem(BaseModel):
     source: str
     status: Literal["pending", "success", "error"]
     analysis: FrameAnalysis | None
+    stabilized: StabilizedSnapshot | None
     raw_responses: list[str]
     errors: list[str]
     warnings: list[str]
@@ -314,6 +427,7 @@ class HistorySummary(BaseModel):
     model: str
     status: Literal["pending", "success", "error"]
     analysis: FrameAnalysis | None
+    stabilized: StabilizedSnapshot | None
     overall_risk: RiskLevel | None
     latency_ms: float | None
     attempts: int

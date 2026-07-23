@@ -16,9 +16,11 @@ from babymonitorvl.monitor import (
     CapturedFrame,
     MonitorService,
     local_validation_correction,
+    redact_rtsp_error_text,
     redact_sensitive_text,
     redact_url,
     utc_now,
+    validation_correction_prompt,
     version_at_least,
 )
 from babymonitorvl.providers.base import (
@@ -29,7 +31,7 @@ from babymonitorvl.providers.base import (
     aggregate_usage,
     should_retry_provider_error,
 )
-from babymonitorvl.schemas import MonitorStartRequest, MonitorStatus, ProviderName
+from babymonitorvl.schemas import FrameAnalysis, MonitorStartRequest, MonitorStatus, ProviderName
 
 
 def frame(sequence: int) -> CapturedFrame:
@@ -43,21 +45,21 @@ def install_capture(service: MonitorService, captured_frame: CapturedFrame) -> N
     service._request_capture = capture  # type: ignore[method-assign]
 
 
-def test_capture_telemetry_measures_recent_demand_driven_captures() -> None:
+def test_capture_telemetry_measures_recent_continuous_preview() -> None:
     telemetry = CaptureTelemetry(max_samples=3)
 
     assert telemetry.observe(10.0, 1000) == (None, None)
-    measured_interval_seconds, analysis_kbps = telemetry.observe(11.0, 2000)
-    assert measured_interval_seconds == pytest.approx(1.0)
-    assert analysis_kbps == pytest.approx(16.0)
+    preview_fps, preview_kbps = telemetry.observe(11.0, 2000)
+    assert preview_fps == pytest.approx(1.0)
+    assert preview_kbps == pytest.approx(16.0)
 
-    measured_interval_seconds, analysis_kbps = telemetry.observe(13.5, 3000)
-    assert measured_interval_seconds == pytest.approx(3.5 / 2)
-    assert analysis_kbps == pytest.approx(40 / 3.5)
+    preview_fps, preview_kbps = telemetry.observe(13.5, 3000)
+    assert preview_fps == pytest.approx(2 / 3.5)
+    assert preview_kbps == pytest.approx(40 / 3.5)
 
-    measured_interval_seconds, analysis_kbps = telemetry.observe(14.5, 4000)
-    assert measured_interval_seconds == pytest.approx(3.5 / 2)
-    assert analysis_kbps == pytest.approx(16.0)
+    preview_fps, preview_kbps = telemetry.observe(14.5, 4000)
+    assert preview_fps == pytest.approx(2 / 3.5)
+    assert preview_kbps == pytest.approx(16.0)
 
 
 def test_capture_telemetry_rejects_invalid_configuration_and_sizes() -> None:
@@ -124,20 +126,17 @@ def fake_jpeg(width: int = 32, height: int = 16) -> bytes:
     )
 
 
-class OneFrameFFmpegProcess(StalledFFmpegProcess):
-    def __init__(self, image_bytes: bytes) -> None:
-        super().__init__()
-        self.stdout.feed_data(image_bytes)
-        self.stdout.feed_eof()
-
-
 @pytest.mark.asyncio
-async def test_capture_process_starts_only_on_demand_and_returns_one_fresh_frame(monkeypatch, tmp_path) -> None:
+async def test_continuous_capture_feeds_preview_and_next_fresh_analysis_frame(
+    monkeypatch,
+    tmp_path,
+) -> None:
     process_calls: list[tuple[str, ...]] = []
+    process = StalledFFmpegProcess()
 
     async def create_process(*args, **kwargs):
         process_calls.append(args)
-        return OneFrameFFmpegProcess(fake_jpeg(1920, 1080))
+        return process
 
     monkeypatch.setattr(monitor_module.asyncio, "create_subprocess_exec", create_process)
     service = MonitorService(
@@ -146,22 +145,37 @@ async def test_capture_process_starts_only_on_demand_and_returns_one_fresh_frame
         EventHub(),
         {},
     )
-    session_id = "on-demand-capture-session"
+    session_id = "continuous-capture-session"
     service._session_id = session_id
     service._config = MonitorStartRequest(
         rtsp_url="rtsp://camera.invalid/stream",
         provider=ProviderName.OLLAMA,
     )
     capture_loop = asyncio.create_task(service._capture_loop(session_id))
-    await asyncio.sleep(0)
-    assert process_calls == []
+    process.stdout.feed_data(fake_jpeg(1280, 720))
 
-    captured = await asyncio.wait_for(service._request_capture(session_id), timeout=1)
+    async def wait_for_first_preview() -> None:
+        while service._latest_capture is None:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_first_preview(), timeout=1)
+    assert len(process_calls) == 1
+    stream = service.live_stream(session_id)
+    assert stream is not None
+    first_part = await asyncio.wait_for(anext(stream), timeout=1)
+    assert first_part.startswith(b"--frame\r\nContent-Type: image/jpeg\r\n")
+    assert fake_jpeg(1280, 720) in first_part
+    await stream.aclose()
+
+    capture_request = asyncio.create_task(service._request_capture(session_id))
+    await asyncio.sleep(0)
+    process.stdout.feed_data(fake_jpeg(1920, 1080))
+    captured = await asyncio.wait_for(capture_request, timeout=1)
     assert (captured.width, captured.height) == (1920, 1080)
     assert len(process_calls) == 1
     command = process_calls[0]
     assert "-vf" not in command
-    assert command[command.index("-frames:v") + 1] == "1"
+    assert "-frames:v" not in command
 
     service._session_id = None
     capture_loop.cancel()
@@ -194,8 +208,6 @@ async def test_frame_stall_terminates_ffmpeg_and_enters_reconnect(monkeypatch, t
         provider=ProviderName.OLLAMA,
     )
     task = asyncio.create_task(service._capture_loop(session_id))
-    request = asyncio.get_running_loop().create_future()
-    await service._capture_requests.put(request)
 
     async def wait_for_reconnect() -> None:
         while service._status.reconnect_attempt < 1:
@@ -218,6 +230,21 @@ def test_rtsp_credentials_and_query_values_are_redacted() -> None:
     assert "secret" not in redacted
     assert "abc" not in redacted
     assert redacted == "rtsp://***:***@camera.local:8554/live?token=%2A%2A%2A&profile=%2A%2A%2A"
+
+
+def test_rtsp_credentials_are_redacted_from_embedded_ffmpeg_diagnostics() -> None:
+    source = "rtsp://alice:secret@camera.local/live?token=abc"
+    message = redact_rtsp_error_text(
+        f"Connection failed for {source}. Retrying rtsps://bob:other@backup/live?key=value",
+        source,
+    )
+    assert "alice" not in message
+    assert "secret" not in message
+    assert "abc" not in message
+    assert "bob" not in message
+    assert "other" not in message
+    assert "value" not in message
+    assert "rtsp://***:***@camera.local/live?token=%2A%2A%2A" in message
 
 
 def test_ollama_version_comparison() -> None:
@@ -268,6 +295,52 @@ def test_local_json_and_schema_failures_get_correction_codes() -> None:
     assert local_validation_correction(RuntimeError("provider failed")) is None
 
 
+def invalid_spatial_analysis_payload() -> dict[str, object]:
+    return {
+        "schema_version": "1.3",
+        "summary": "The blanket is below the infant's visible face.",
+        "image_quality": "good",
+        "infants": [
+            {
+                "infant_box": [400, 100, 600, 300],
+                "mouth_nose_box": [440, 180, 470, 220],
+                "posture": "side_lying",
+                "mouth_nose_occlusion": "partially_covered",
+                "blanket_coverage": "present_not_covering",
+                "related_objects": [
+                    {
+                        "kind": "blanket",
+                        "box": [500, 80, 900, 400],
+                        "relation": "partially_covers_mouth_nose",
+                    }
+                ],
+                "risk_level": "watch",
+                "confidence": 0.8,
+                "evidence": ["The blanket is below the face."],
+            }
+        ],
+        "adult_presence": "not_detected",
+        "adults": [],
+        "cats": [],
+        "overall_risk": "watch",
+        "risk_reasons": ["Possible mouth/nose coverage."],
+    }
+
+
+def test_mouth_nose_spatial_validation_gets_targeted_correction() -> None:
+    with pytest.raises(ValidationError) as exc_info:
+        FrameAnalysis.model_validate(invalid_spatial_analysis_payload())
+
+    correction = local_validation_correction(exc_info.value)
+    assert correction == "infants.0:mouth_nose_spatial_grounding"
+    retry_prompt = validation_correction_prompt("baseline", correction)
+    assert retry_prompt.startswith("baseline\n\nVALIDATION CORRECTION:")
+    assert "positive-area intersection" in retry_prompt
+    assert "max(mouth_ymin, object_ymin) < min(mouth_ymax, object_ymax)" in retry_prompt
+    assert "A nearby blanket below the face does not cover the mouth/nose." in retry_prompt
+    assert "The blanket is below the infant" not in retry_prompt
+
+
 class JsonRetryBackend(VisionBackend):
     name = ProviderName.OLLAMA
 
@@ -281,6 +354,14 @@ class JsonRetryBackend(VisionBackend):
         self.prompts.append(request.prompt)
         if len(self.prompts) == 1:
             return ProviderCallResult("not valid JSON")
+        return valid_empty_analysis_result()
+
+
+class SpatialRetryBackend(JsonRetryBackend):
+    async def analyze(self, request: AnalysisRequest) -> ProviderCallResult:
+        self.prompts.append(request.prompt)
+        if len(self.prompts) == 1:
+            return ProviderCallResult(json.dumps(invalid_spatial_analysis_payload()))
         return valid_empty_analysis_result()
 
 
@@ -325,7 +406,7 @@ async def test_analysis_requests_fresh_frame_only_after_result_and_respects_mini
         EventHub(),
         {ProviderName.OLLAMA: backend},
     )
-    session_id = "demand-driven-session"
+    session_id = "sequential-analysis-session"
     service._session_id = session_id
     service._config = MonitorStartRequest(
         rtsp_url="rtsp://camera.invalid/stream",
@@ -425,10 +506,12 @@ class EmptySceneNormalRiskBackend(JsonRetryBackend):
 async def test_analysis_retry_adds_json_validation_correction(tmp_path) -> None:
     backend = JsonRetryBackend()
     history = HistoryStore(1024 * 1024)
+    events = EventHub()
+    event_queue = await events.subscribe()
     service = MonitorService(
         Settings(frontend_dist=tmp_path),
         history,
-        EventHub(),
+        events,
         {ProviderName.OLLAMA: backend},
     )
     session_id = "json-retry-session"
@@ -462,6 +545,14 @@ async def test_analysis_retry_adds_json_validation_correction(tmp_path) -> None:
     assert records[0].attempts == 2
     detail = await history.get(records[0].id)
     assert detail is not None
+    assert detail.stabilized is not None
+    assert detail.stabilized.record_id == detail.id
+    published_events = []
+    while not event_queue.empty():
+        published_events.append(event_queue.get_nowait())
+    assert "alarm_updated" in [item["type"] for item in published_events]
+    alarm_event = next(item for item in published_events if item["type"] == "alarm_updated")
+    assert alarm_event["data"]["record_id"] == detail.id
     assert [item.outcome for item in detail.attempt_details] == ["validation_error", "success"]
     assert detail.prompt == backend.prompts[0]
     assert [item.prompt for item in detail.attempt_details] == backend.prompts
@@ -472,6 +563,49 @@ async def test_analysis_retry_adds_json_validation_correction(tmp_path) -> None:
     assert detail.attempt_details[0].retry_reason == "local_validation:root:invalid_json_envelope"
     assert detail.attempt_details[1].response_index == 1
     assert detail.attempt_details[1].will_retry is False
+
+
+@pytest.mark.asyncio
+async def test_analysis_retry_adds_targeted_mouth_nose_spatial_guidance(tmp_path) -> None:
+    backend = SpatialRetryBackend()
+    history = HistoryStore(1024 * 1024)
+    service = MonitorService(
+        Settings(frontend_dist=tmp_path),
+        history,
+        EventHub(),
+        {ProviderName.OLLAMA: backend},
+    )
+    session_id = "spatial-retry-session"
+    service._session_id = session_id
+    service._config = MonitorStartRequest(
+        rtsp_url="rtsp://camera.invalid/stream",
+        provider=ProviderName.OLLAMA,
+        model="test-model",
+    )
+    service._model = "test-model"
+    install_capture(service, frame(1))
+    task = asyncio.create_task(service._analysis_loop(session_id))
+
+    async def wait_for_completion() -> None:
+        while service._status.completed_count < 1:
+            await asyncio.sleep(0)
+
+    await asyncio.wait_for(wait_for_completion(), timeout=1)
+    service._session_id = None
+    task.cancel()
+    await asyncio.gather(task, return_exceptions=True)
+
+    assert len(backend.prompts) == 2
+    assert "infants.0:mouth_nose_spatial_grounding" in backend.prompts[1]
+    assert "positive-area intersection" in backend.prompts[1]
+    records, _ = await history.list(limit=10)
+    detail = await history.get(records[0].id)
+    assert detail is not None
+    assert detail.status == "success"
+    assert detail.attempt_details[0].retry_reason == (
+        "local_validation:infants.0:mouth_nose_spatial_grounding"
+    )
+    assert detail.attempt_details[1].outcome == "success"
 
 
 @pytest.mark.asyncio

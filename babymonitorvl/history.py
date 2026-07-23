@@ -7,7 +7,14 @@ from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from typing import Any
 
-from .schemas import AnalysisAttempt, FrameAnalysis, HistoryItem, HistorySummary, ProviderName
+from .schemas import (
+    AnalysisAttempt,
+    FrameAnalysis,
+    HistoryItem,
+    HistorySummary,
+    ProviderName,
+    StabilizedSnapshot,
+)
 
 
 def utc_now() -> datetime:
@@ -32,6 +39,7 @@ class HistoryRecord:
     completed_at: datetime | None = None
     status: str = "pending"
     analysis: FrameAnalysis | None = None
+    stabilized: StabilizedSnapshot | None = None
     raw_responses: list[str] = field(default_factory=list)
     errors: list[str] = field(default_factory=list)
     warnings: list[str] = field(default_factory=list)
@@ -47,6 +55,7 @@ class HistoryRecord:
             "schema": self.output_schema,
             "generation_params": self.generation_params,
             "analysis": self.analysis.model_dump(mode="json") if self.analysis else None,
+            "stabilized": self.stabilized.model_dump(mode="json") if self.stabilized else None,
             "raw_responses": self.raw_responses,
             "errors": self.errors,
             "warnings": self.warnings,
@@ -72,6 +81,7 @@ class HistoryRecord:
             source=self.source,
             status=self.status,  # type: ignore[arg-type]
             analysis=self.analysis,
+            stabilized=self.stabilized,
             raw_responses=self.raw_responses,
             errors=self.errors,
             warnings=self.warnings,
@@ -99,6 +109,7 @@ class HistoryRecord:
             model=self.model,
             status=self.status,  # type: ignore[arg-type]
             analysis=self.analysis,
+            stabilized=self.stabilized,
             overall_risk=self.analysis.overall_risk if self.analysis else None,
             latency_ms=self.latency_ms,
             attempts=self.attempts,
@@ -139,6 +150,7 @@ class HistoryStore:
         attempt_details: list[AnalysisAttempt],
         latency_ms: float | None,
         attempts: int,
+        stabilized: StabilizedSnapshot | None = None,
         usage: dict[str, Any] | None = None,
     ) -> HistoryRecord | None:
         async with self._lock:
@@ -148,6 +160,7 @@ class HistoryStore:
             self._bytes -= record.accounted_bytes
             record.status = status
             record.analysis = analysis
+            record.stabilized = stabilized
             record.raw_responses = list(raw_responses)
             record.errors = list(errors)
             record.warnings = list(warnings)
